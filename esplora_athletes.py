@@ -1,4 +1,4 @@
-"""Esplora i db Notion degli atleti: non scrive nulla, legge soltanto.
+"""Esplora i db Notion degli atleti (seconda passata): non scrive nulla, legge soltanto.
 
 Scopo: capire com'e' fatto il db Athletes e il db dei risultati (MASTER RESULTS), per costruire poi
 l'agente che stima le qualificazioni a LA28. Il risultato va nel log e nel file esplora_athletes.txt.
@@ -108,6 +108,19 @@ def query(dbid, flt=None, limit=None):
         cur = r["next_cursor"]
 
 
+
+def short(t, n=700):
+    return t if len(t) <= n else t[:n] + " ..."
+
+
+def nid(x):
+    return (x or "").replace("-", "").lower()
+
+
+def sel(pr, name):
+    return flat(pr.get(name, {"type": "select", "select": None}))
+
+
 say("=== 1. Database visibili alla connessione ===")
 dbs, cur = [], None
 while True:
@@ -119,86 +132,111 @@ while True:
     if not r.get("has_more"):
         break
     cur = r["next_cursor"]
-by_title = {}
 for d in dbs:
     title = plain(d.get("title"))
-    by_title.setdefault(title, d)
-    say(f"  {title!r}  id={d['id']}  proprieta'={len(d['properties'])}")
+    names = list(d["properties"].keys())
+    say(f"  {title!r}  id={d['id']}  proprieta'={len(names)}" + ("  -> " + ", ".join(names[:12]) if not title else ""))
 
-WANT = ["Athletes", "MASTER RESULTS", "Nations", "LA28 Sports Program", "🎟️ Direct Q Events LA28", "MASTER MINOR"]
+
+def find(*needles):
+    for d in dbs:
+        t = plain(d.get("title")).lower()
+        if any(n.lower() in t for n in needles):
+            return d
+    return None
+
+
+ATH = find("athletes")
+RA = next((d for d in dbs if plain(d.get("title")).strip() == "Risultati A"), None)
+RB = next((d for d in dbs if plain(d.get("title")).strip() == "Risultati B"), None)
+OTHERS = [
+    ("Direct Q Events", find("direct q events")),
+    ("Qualification Schedule", find("qualification schedule")),
+    ("Qualification System", find("qualification system")),
+    ("World Rankings", find("world rankings")),
+    ("Tempi Limite", find("tempi limite")),
+    ("LA28 Sports Program", find("sports program", "home of the olympic")),
+    ("Archivio Sport", find("archivio sport")),
+    ("DB Events", find("db events")),
+    ("Direct Event Winners", find("direct event winners")),
+]
+if not ATH:
+    sys.exit("Manca il db Athletes.")
+
 say("")
-say("=== 2. Struttura dei db che servono ===")
-found = {}
-for w in WANT:
-    d = by_title.get(w)
+say("=== 2. Struttura dei db ===")
+for label, d in [("Risultati A", RA), ("Risultati B", RB)] + OTHERS:
     if not d:
-        say(f"  !! NON TROVATO: {w!r}. Il db non e' condiviso con la connessione (vedi guida) oppure ha un altro nome.")
+        say(f"-- {label}: NON TROVATO tra i db condivisi")
         continue
-    found[w] = d
-    say(f"-- {w}  (id {d['id']})")
+    say(f"-- {label}  (id {d['id']})")
     say("   " + " ; ".join(f"{k}:{v['type']}" for k, v in d["properties"].items()))
-if "Athletes" not in found:
-    sys.exit("Senza il db Athletes non posso andare avanti.")
 
-ath_id = found["Athletes"]["id"]
 say("")
-say("=== 3. Atleti italiani per sport (e quanti con Pass LA28 = Q) ===")
-noc_opts = [o["name"] for o in found["Athletes"]["properties"]["NOC"]["select"]["options"] if "ITA" in o["name"]]
-say("  opzioni NOC con ITA:", noc_opts)
-ita = []
-for n in noc_opts:
-    ita += query(ath_id, {"property": "NOC", "select": {"equals": n}})
-say(f"  atleti italiani letti: {len(ita)}")
-cnt = {}
-for a in ita:
-    pr = a["properties"]
-    sp = flat(pr["Sport"]) if "Sport" in pr else ""
-    q = flat(pr.get("🎟️Pass LA28", {"type": "select", "select": None}))
-    c = cnt.setdefault(sp or "(vuoto)", [0, 0])
-    c[0] += 1
-    c[1] += 1 if q == "Q" else 0
-for sp, (n, q) in sorted(cnt.items(), key=lambda x: -x[1][0]):
-    say(f"  {sp:24} atleti={n:4}  Q={q}")
+say("=== 3. Righe di esempio e contenuto dei db di supporto ===")
+LIMITS = {"Qualification System": 40, "Qualification Schedule": 40, "Direct Q Events": 40, "World Rankings": 12,
+          "Tempi Limite": 15, "LA28 Sports Program": 25, "Archivio Sport": 10, "DB Events": 10, "Direct Event Winners": 10}
+for label, d in OTHERS:
+    if not d:
+        continue
+    rows = query(d["id"], limit=LIMITS.get(label, 8))
+    say(f"-- {label}: prime {len(rows)} righe")
+    for r in rows:
+        say("   - " + short(row_text(r), 600))
 
-SAMPLE_SPORTS = ["Judo", "Tennis", "Fencing", "Archery", "Boxing", "Wrestling", "Taekwondo", "Table Tennis", "Weightlifting", "Equestrian"]
 say("")
-say("=== 4. Esempi: scheda atleta + suoi risultati (tutte le proprieta' con un valore) ===")
-res_db = found.get("MASTER RESULTS")
-for sp in SAMPLE_SPORTS:
-    picks = [a for a in ita if flat(a["properties"].get("Sport", {"type": "select", "select": None})) == sp][:2]
+say("=== 4. Atleti italiani e risultati di esempio (Risultati A e B) ===")
+ita = query(ATH["id"], {"property": "NOC", "select": {"equals": "🇮🇹ITA"}})
+say(f"  atleti italiani: {len(ita)}")
+
+
+def rel_prop(d):
+    for k, v in d["properties"].items():
+        if v["type"] == "relation" and nid(v["relation"].get("database_id")) == nid(ATH["id"]):
+            return k
+    return None
+
+
+for label, d in [("Risultati A", RA), ("Risultati B", RB)]:
+    if d:
+        say(f"  {label}: la relazione verso Athletes si chiama {rel_prop(d)!r}")
+
+SAMPLE = ["Judo", "Tennis", "Fencing", "Archery", "Boxing", "Wrestling", "Taekwondo", "Weightlifting", "Sport Climbing",
+          "Shooting", "Swimming", "Athletics", "Table Tennis", "Canoe Slalom", "Cycling Track"]
+for sp in SAMPLE:
+    picks = [a for a in ita if sel(a["properties"], "Sport") == sp and
+             flat(a["properties"].get("MASTER RESULTS", {"type": "relation", "relation": []})) != "[0 collegamenti]"][:1]
     for a in picks:
         say("")
-        say(f"##### [{sp}] ATLETA: " + row_text(a))
-        if not res_db:
-            continue
-        rows = query(res_db["id"], {"property": "Athlete", "relation": {"contains": a["id"]}}, limit=6)
-        say(f"   risultati letti (max 6): {len(rows)}")
-        for r in rows:
-            say("   - " + row_text(r))
+        say(f"##### [{sp}] {flat(a['properties']['Cognome e Nome'])}  (pagina {a['id']})")
+        for label, d in [("Risultati A", RA), ("Risultati B", RB)]:
+            rp = rel_prop(d) if d else None
+            if not rp:
+                continue
+            rows = query(d["id"], {"property": rp, "relation": {"contains": a["id"]}}, limit=4)
+            say(f"   {label}: {len(rows)} righe lette (max 4)")
+            for r in rows:
+                say("     - " + short(row_text(r), 1100))
 
 say("")
-say("=== 5. Altri db: 4 righe di esempio ciascuno ===")
-for w in ["Nations", "LA28 Sports Program", "🎟️ Direct Q Events LA28", "MASTER MINOR"]:
-    d = found.get(w)
+say("=== 5. Quanti risultati ci sono, per anno e per edizione (lettura completa) ===")
+for label, d in [("Risultati A", RA), ("Risultati B", RB)]:
     if not d:
         continue
-    say(f"-- {w}")
-    for r in query(d["id"], limit=4):
-        say("   - " + row_text(r))
-
-say("")
-say("=== 6. Conteggio dei risultati per Sport, Edition e Anno (campione: primi 1500 risultati) ===")
-if res_db:
-    rows = query(res_db["id"], limit=1500)
+    rows = query(d["id"])
+    say(f"-- {label}: {len(rows)} righe in tutto")
     k = {}
     for r in rows:
         pr = r["properties"]
-        key = (flat(pr.get("Sport", {"type": "select", "select": None})) or "(vuoto)",
-               flat(pr.get("Edition", {"type": "select", "select": None})) or "(vuoto)",
-               flat(pr.get("Anno", {"type": "number", "number": None})))
+        key = (sel(pr, "Edition") or "-", flat(pr.get("Anno", {"type": "number", "number": None})))
         k[key] = k.get(key, 0) + 1
-    for key, n in sorted(k.items(), key=lambda x: -x[1])[:60]:
-        say(f"  {key}: {n}")
+    for key, n in sorted(k.items(), key=lambda x: -x[1])[:25]:
+        say(f"   edizione={key[0]} anno={key[1]}: {n}")
+    ev = {}
+    for r in rows:
+        e = sel(r["properties"], "Evento") or "-"
+        ev[e] = ev.get(e, 0) + 1
+    say("   eventi piu' frequenti: " + "; ".join(f"{e}={n}" for e, n in sorted(ev.items(), key=lambda x: -x[1])[:40]))
 
 say("")
 say("Esplorazione finita: non e' stato scritto nulla su Notion.")
