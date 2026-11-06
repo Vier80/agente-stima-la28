@@ -33,7 +33,10 @@ import requests
 from regole_la28 import RULES, sport_canonico
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
-DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
+_RAW_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
+_m = re.search(r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}", _RAW_ID)
+# accetta sia l'ID da solo sia il link intero copiato da Notion: ne estrae i 32 caratteri dell'ID
+DATABASE_ID = _m.group(0).replace("-", "").lower() if _m else _RAW_ID
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "si", "sì")
 JSON_OUT = "stima_la28.json"
 OGGI = date.today()
@@ -842,7 +845,15 @@ SCHEMA = {
 
 
 def prepara_db():
-    d = call("GET", f"/databases/{DATABASE_ID}")
+    if not re.fullmatch(r"[0-9a-f]{32}", DATABASE_ID):
+        die("il segreto NOTION_DATABASE_ID non contiene un ID valido (servono 32 caratteri, lettere a-f e numeri). "
+            "Apri il db 'Stima LA28' in Notion, Condividi -> Copia link, e incolla il link intero nel segreto.")
+    try:
+        d = call("GET", f"/databases/{DATABASE_ID}")
+    except RuntimeError as e:
+        die("Notion non trova il db 'Stima LA28' con l'ID indicato nel segreto NOTION_DATABASE_ID. Controlla che sia l'ID "
+            "del database (non di una vista o di una pagina) e che il db sia collegato alla connessione "
+            f"({e})")
     props = d["properties"]
     nuove = {}
     tk = titolo_di(props)
