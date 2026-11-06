@@ -512,8 +512,9 @@ def parti_prova(testo, kind):
     if kind in ("team", "pair"):
         unita = kind
         res = SPORT_WORDS.sub(" ", res)
+        res3 = "3x3" if re.search(r"3\s*x\s*3", t) else ""
         res = re.sub(r"\b(t20|t10|7s|sevens|field|3x3|5x5)\b", " ", res)
-        res = re.sub(r"\s+", " ", res).strip(" -/") if kind == "pair" else ""
+        res = re.sub(r"\s+", " ", res).strip(" -/") if kind == "pair" else res3
     else:
         unita = "team" if PARSE_TEAM.search(res) else "pair" if PARSE_PAIR.search(res) else "ind"
     return g, res, unita
@@ -659,10 +660,10 @@ def stima_generica(atleti, escludi_ids, log):
             elif unita == "pair":
                 nome, tipo = " / ".join(a["nome"] for a in u["membri"]), "Squadra"
             else:
-                nome = "Italia" + (f" ({IT_GENERE[g]})" if g else "")
+                nome = "Italia" + (" 3x3" if "3x3" in res else "") + (f" ({IT_GENERE[g]})" if g else "")
                 tipo = "Squadra"
-            disc = label if unita == "ind" else (f"{sport} {IT_GENERE[g]}".strip() if regola["kind"] != "ind"
-                                                else f"{label}")
+            disc = label if unita == "ind" else (f"{sport}{' 3x3' if '3x3' in res else ''} {IT_GENERE[g]}".strip()
+                                                if regola["kind"] != "ind" else f"{label}")
             if certo:
                 p, marg, nota = 100.0, None, "in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita"
                 liv, pas = "Certo", "Q"
