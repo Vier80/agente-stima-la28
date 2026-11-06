@@ -81,6 +81,42 @@ INVERNALI = {
     "Snowboarding", "Speed Skating",
 }
 
+# Per alcuni sport il valore che conta non e' "Punti per Disciplina" ma una colonna dedicata di Athletes.
+# sport -> (sigla della colonna, come leggere il valore): "punti" = piu' alto e' meglio, "posizione" = piu' basso e' meglio.
+# Le colonne si trovano dalla sigla (le emoji nel nome non contano): WON, FEN, WB, UWW, KG.
+METRICHE = {
+    "Badminton": ("WON", "punti"), "Table Tennis": ("WON", "punti"), "Sailing": ("WON", "punti"),
+    "Sport Climbing": ("WON", "punti"), "Archery": ("WON", "punti"), "Triathlon": ("WON", "punti"),
+    "Fencing": ("FEN", "punti"), "Boxing": ("WB", "punti"), "Wrestling": ("UWW", "punti"),
+    "Weightlifting": ("KG", "punti"),
+}
+BASE_POSIZIONE = 1_000_000.0   # per le colonne "posizione" il punteggio interno e' BASE - posizione
+
+
+def sigla_colonna(nome):
+    return "".join(c for c in (nome or "") if c.isascii() and c.isalnum()).upper()
+
+
+def trova_metrica(props, sigla):
+    """Colonna di Athletes la cui sigla (solo lettere/numeri ASCII) e' esattamente quella indicata; evita le varianti in %."""
+    for k in props:
+        if sigla_colonna(k) == sigla and "\uff05" not in k and "%" not in k:
+            return k
+    return None
+
+
+def leggi_metrica(raw):
+    """Testo/numero della colonna -> ('eventi', {prova: valore}) oppure ('num', valore) oppure None."""
+    if raw in ("", None):
+        return None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return ("num", float(raw))
+    ev = parse_punti(str(raw))
+    if ev:
+        return ("eventi", ev)
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(raw))
+    return ("num", float(m.group().replace(",", "."))) if m else None
+
 
 def die(msg):
     print("ERRORE:", msg, flush=True)
@@ -315,6 +351,11 @@ def leggi_athletes(dbs, log):
     dk = prop(pr0, "Disciplina", tipo="multi_select")
     pdk = prop(pr0, "Punti per Disciplina")
     qk = prop(pr0, "PTS Q")
+    col_metrica = {}
+    for sp, (sigla, _) in METRICHE.items():
+        col_metrica[sp] = trova_metrica(pr0, sigla)
+    log("Colonne dedicate per sport: " + ", ".join(f"{sp}={col_metrica[sp]!r}" for sp in METRICHE))
+    campioni = {}
     for o, flt, completo in letture:
         pagine = query(d["id"], flt)
         n_it = 0
@@ -331,12 +372,50 @@ def leggi_athletes(dbs, log):
                 pass_vals[pas] = pass_vals.get(pas, 0) + 1
                 n_it += 1
             ptsq = num(flat(pr[qk])) if qk else None
+            canon = sport_canonico(o)
+            disc = flat(pr[dk]) if dk else ""
+            pts = parse_punti(flat(pr[pdk]) if pdk else "")
+            pt_txt = {}
+            if canon in METRICHE and col_metrica.get(canon) and col_metrica[canon] in pr:
+                sigla, direzione = METRICHE[canon]
+                raw = flat(pr[col_metrica[canon]])
+                m = leggi_metrica(raw)
+                cs = campioni.setdefault(canon, {"ita": [], "altri": [], "num": []})
+                if len(cs["ita" if ita else "altri"]) < 4 and raw not in ("", None):
+                    cs["ita" if ita else "altri"].append(f"{nome} [{disc[:30]}] {sigla}={str(raw)[:50]}")
+                if m:
+                    if m[0] == "num":
+                        cs["num"].append(m[1])
+                    nuovi = {}
+                    if m[0] == "eventi":
+                        nuovi = {ev: v for ev, v in m[1].items()}
+                    else:
+                        for ev in [e for e in disc.split("|") if e and not e.startswith("\U0001F534")]:
+                            g, res, unita = parti_prova(ev, RULES[canon]["kind"])
+                            if unita == "ind":
+                                nuovi[ev] = m[1]
+                    for ev, v in nuovi.items():
+                        kev = parti_prova(ev, RULES[canon]["kind"])[:2]
+                        for vecchio in [e for e in pts if parti_prova(e, RULES[canon]["kind"])[:2] == kev]:
+                            del pts[vecchio]       # la colonna dedicata sostituisce i punti generici della stessa prova
+                        if direzione == "posizione":
+                            pts[ev] = BASE_POSIZIONE - v
+                            pt_txt[ev] = f"{sigla} {v:g}"
+                        else:
+                            pts[ev] = v
+                            pt_txt[ev] = f"{v:g} {sigla}"
             out.append({"id": p["id"], "nome": nome, "sport": "" if o == "(senza sport)" else o,
-                        "canon": sport_canonico(o), "noc": noc, "ita": ita,
-                        "disc": flat(pr[dk]) if dk else "", "pass": pas, "q": is_q(pas),
-                        "pts": parse_punti(flat(pr[pdk]) if pdk else ""), "ptsq": ptsq})
+                        "canon": canon, "noc": noc, "ita": ita,
+                        "disc": disc, "pass": pas, "q": is_q(pas),
+                        "pts": pts, "ptsq": ptsq, "pt_txt": pt_txt})
         log(f"   {o:<24} {len(pagine):>5} atleti letti ({'tutte le nazioni' if completo else 'solo italiani'}), "
             f"italiani {n_it}")
+    for sp, cs in sorted(campioni.items()):
+        nums = sorted(cs["num"])
+        rng = f"valori numerici {nums[0]:g} .. {nums[-1]:g} (mediana {nums[len(nums)//2]:g}), n={len(nums)}" if nums else "nessun valore numerico"
+        log(f"Colonna {METRICHE[sp][0]} per {sp} ({METRICHE[sp][1]}): {rng}")
+        for r in cs["ita"] + cs["altri"]:
+            log("      " + r)
     log(f"Athletes: {len(out)} atleti letti, di cui italiani {sum(1 for x in out if x['ita'])}. "
         f"Valori di 'Pass LA28' tra gli italiani: {pass_vals}")
     return out
@@ -591,7 +670,7 @@ def stima_generica(atleti, escludi_ids, log):
             if primo:
                 prove = {primo: a["ptsq"]}
         for ev, pt in prove.items():
-            if pt <= 0:
+            if pt <= 0 or ev.startswith("\U0001F534"):
                 continue
             g, res, unita = parti_prova(ev, regola["kind"])
             chiave = f"{g}|{res}"
@@ -677,7 +756,8 @@ def stima_generica(atleti, escludi_ids, log):
                     nota = f"oltre il limite di {massimo} per nazione in questa prova: passa solo se un connazionale rinuncia"
                 else:
                     p, marg, extra = valuta_posizione(u["pos"], len(classifica), posti, quota, regola["fine"])
-                    nota = (f"{u['pts']:g} pt, posizione {u['pos']} su {len(classifica)} in classifica per questa prova; "
+                    dato = (ita[0].get("pt_txt", {}).get(gr["label"]) or f"{u['pts']:g} pt") if unita == "ind" else f"{u['pts']:g} pt"
+                    nota = (f"{dato}, posizione {u['pos']} su {len(classifica)} in classifica per questa prova; "
                             f"posti decisi dal ranking {posti} su {quota} (margine {marg:+d}); "
                             f"{mesi_rimasti(regola['fine']):.0f} mesi alla fine del periodo." + extra)
                 liv = livello(p)

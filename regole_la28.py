@@ -43,6 +43,8 @@ RULES = {
                    note="synchro: 8 coppie stimate"),
     "Shooting": dict(kind="ind", quota=28, max_noc=2, rank_share=0.6, fine=d("2028-05-01"),
                      alias=["shooting"]),
+    "Wrestling": dict(kind="ind", quota=16, max_noc=1, rank_share=0.6, fine=d("2028-06-30"), alias=["wrestling"],
+                      note="provvisorio: i posti per categoria dipendono dal regolamento UWW per LA28"),
     "Weightlifting": dict(kind="ind", quota=12, max_noc=1, rank_share=0.8, fine=d("2028-05-07"),
                           alias=["weightlifting"]),
     "Artistic Gymnastics": dict(kind="ind", quota=24, max_noc=4, rank_share=0.7, fine=d("2028-05-31"),
@@ -123,7 +125,7 @@ RULES = {
     "Flag Football": dict(kind="team", quota=6, max_noc=1, rank_share=0.4, fine=d("2028-06-11"), team_size=5,
                           alias=["flagfootball"]),
     "Lacrosse": dict(kind="team", quota=6, max_noc=1, rank_share=0.4, fine=d("2028-04-01"), team_size=6,
-                     alias=["lacrosse"]),
+                     alias=["lacrosse", "lacrossesixes"]),
     "Cricket": dict(kind="team", quota=6, max_noc=1, rank_share=0.4, fine=d("2028-03-01"), team_size=8,
                     alias=["cricket"]),
 }
