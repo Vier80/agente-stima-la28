@@ -552,10 +552,25 @@ def valuta_posizione(pos, n_in_classifica, posti, quota, fine):
     p = min(0.90, max(0.01, p))
     nota = ""
     if n_in_classifica < 1.5 * posti:
-        if p > 0.6:
-            p = 0.6
-        nota = " Pochi atleti con punteggio nel db per questa prova: stima prudente."
+        # il db contiene solo una parte del campo mondiale: la posizione conta ancora, ma la stima non supera il 60%
+        # e scende con la posizione nella classifica parziale
+        p = min(p, 0.60 * math.sqrt(max(0.0, 1 - (pos - 1) / max(n_in_classifica, 1))))
+        p = max(p, 0.02)
+        nota = (f" Nel db ci sono solo {n_in_classifica} atleti con punteggio per questa prova (posti da ranking: {posti}): "
+                "stima prudente, migliora quando si aggiungono i risultati.")
     return round(p * 100, 1), margine, nota
+
+
+def codice_noc(noc):
+    return "".join(c for c in (noc or "") if c.isascii() and c.isalpha()).upper()
+
+
+def riga_squadra(a):
+    """True se la riga di Athletes e' una squadra/coppia intera (es. "ITA Men's Team Foil"), non un atleta singolo:
+    il nome comincia con il codice della nazione (ITA, FRA...) oppure contiene "/" (coppia)."""
+    n = (a["nome"] or "").strip()
+    cod = codice_noc(a["noc"])
+    return bool((cod and n.upper().startswith(cod + " ")) or " / " in n or "/" in n)
 
 
 def stima_generica(atleti, escludi_ids, log):
@@ -592,9 +607,16 @@ def stima_generica(atleti, escludi_ids, log):
             lst.sort(key=lambda x: -x[0])
             if unita == "ind":
                 unita_lista += [{"noc": noc, "pts": pt, "membri": [a]} for pt, a in lst]
+            elif unita == "team" and (regola["kind"] == "team" or any(riga_squadra(a) for _, a in lst)):
+                # nel db la squadra e' gia' una riga (es. "ITA Men's Volley", "ITA Men's Team Foil") con i suoi punti
+                righe_sq = [(pt, a) for pt, a in lst if riga_squadra(a)] or lst
+                unita_lista += [{"noc": noc, "pts": pt, "membri": [a], "entry": True} for pt, a in righe_sq]
             elif unita == "team":
                 top = lst[:dimensione]
                 unita_lista.append({"noc": noc, "pts": sum(pt for pt, _ in top), "membri": [a for _, a in top]})
+            elif all(riga_squadra(a) for _, a in lst):
+                # la coppia e' gia' una riga unica (es. "ITA Men's Beach" o "ROSSI / BIANCHI")
+                unita_lista += [{"noc": noc, "pts": pt, "membri": [a], "entry": True} for pt, a in lst]
             else:
                 for i in range(0, len(lst), 2):
                     ch = lst[i:i + 2]
@@ -619,6 +641,18 @@ def stima_generica(atleti, escludi_ids, log):
                     coperti.add(a["id"])      # tutta la rosa italiana presente in db appartiene a questa squadra
             certo = any(a["q"] for a in ita) or (regola["kind"] in ("team", "pair") and
                                                   any(a["q"] for _, a in gr["membri"].get(u["noc"], [])))
+            n_rosa = len(gr["membri"].get(u["noc"], [])) if unita == "team" else len(u["membri"])
+            minimo = 2 if unita == "pair" else max(2, (dimensione + 1) // 2)
+            if unita != "ind" and regola["kind"] != "team" and not u.get("entry") and not certo and n_rosa < minimo:
+                righe.append(dict(sport=sport, disciplina=(gr["label"] if unita == "ind" or regola["kind"] == "ind"
+                                                          else f"{sport} {IT_GENERE[g]}".strip())[:100],
+                                  nome=(" / ".join(a["nome"] for a in u["membri"]) if unita == "pair"
+                                        else "Italia" + (f" ({IT_GENERE[g]})" if g else "")),
+                                  tipo="Squadra", livello="Dati insufficienti", p=None, via="", rank=None,
+                                  margine=None, stato="Rosa incompleta", pass_="", fine=regola["fine"].isoformat(),
+                                  nota=f"in Athletes ci sono solo {n_rosa} atleti italiani con punti per questa squadra "
+                                       f"(ne servono almeno {minimo}): la forza della squadra non e' misurabile"))
+                continue
             label = gr["label"]
             if unita == "ind":
                 nome, tipo = ita[0]["nome"], "Atleta"
@@ -665,7 +699,8 @@ def stima_generica(atleti, escludi_ids, log):
                               nota="in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita", pass_="Q",
                               fine=regola["fine"].isoformat()))
         else:
-            righe.append(dict(sport=a["canon"], disciplina=disc[:100], nome=a["nome"], tipo="Atleta",
+            righe.append(dict(sport=a["canon"], disciplina=disc[:100], nome=a["nome"],
+                              tipo="Squadra" if riga_squadra(a) else "Atleta",
                               livello="Dati insufficienti", p=None, via="", rank=None, margine=None,
                               stato="Senza punteggio", pass_="", fine=regola["fine"].isoformat(),
                               nota="in Athletes non ci sono punti per la prova: serve un ranking o un risultato per stimare"))
@@ -683,7 +718,7 @@ def stima_generica(atleti, escludi_ids, log):
             righe.append(dict(sport=sport, disciplina=disc, nome=nome, tipo="Squadra", livello="Dati insufficienti",
                               p=None, via="", rank=None, margine=None, stato="Senza punteggio", pass_="",
                               fine=regola["fine"].isoformat(),
-                              nota=f"{x['n']} atleti italiani in Athletes ma senza punti per questa squadra: "
+                              nota="in Athletes la squadra italiana non ha punti per questa prova: "
                                    "serve il ranking della nazione per stimare"))
     # diagnostica
     log(f"\nStima generica: {len(gruppi)} prove con almeno un punteggio, {len(righe)} righe italiane.")
@@ -772,15 +807,19 @@ def costruisci(tutti, sims, wrest, log):
             aggiungi(sport=a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Certo", p=100.0,
                      stato="Pass LA28", nota="in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita",
                      pass_="Q")
+        elif re.search(r"\bteam\b|\bmixed\b", a["nome"], re.I):
+            continue      # voce di squadra (es. 'ITA Judo Mixed Team'), non un atleta
         elif a["sport"] in ("Judo", "Taekwondo", "Wrestling"):
             non_abbinati.append(a)
             end = dict((s, e) for s, _, e, _ in SIMS).get(a["sport"], WRESTLING_END)
             aggiungi(sport=a["sport"], disciplina=disc, nome=a["nome"], livello="Fuori", p=1.0, stato="Non in classifica",
                      nota="non compare nella simulazione: fuori dalle posizioni utili del ranking olimpico",
                      fine=end.isoformat())
+        elif sp_sim in ("Canoa", "Ciclismo"):
+            continue      # la simulazione e' a livello di nazione/equipaggio: le righe di squadra coprono questi sport
         else:
             motivo = ("sport con simulazione a squadre/nazione: l'atleta non e' legato a una riga" if sp_sim
-                      else "sport senza simulazione (fase 2 del progetto)")
+                      else "sport senza regole di qualificazione nel file regole_la28.py")
             aggiungi(sport=a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Dati insufficienti",
                      p=None, stato="Senza simulazione", nota=motivo)
     log(f"Atleti di Athletes non abbinati a una riga di simulazione ma in sport simulati (judo/tkd/wrestling): "
@@ -904,8 +943,9 @@ METODO = [
     "Tutte le altre discipline estive usano i regolamenti di qualificazione del CIO (posti per prova, limite per nazione, "
     "data di chiusura) applicati ai punteggi del db Athletes: per ogni prova si ordinano gli atleti di tutte le nazioni, "
     "si applica il limite per nazione e si guarda se l'atleta e' entro i posti assegnati dal ranking.",
-    "Negli sport di squadra la forza di una nazione e' la somma dei punti dei suoi migliori atleti; le coppie (beach volley, "
-    "doppi) sono formate dai due migliori atleti della stessa nazione.",
+    "Negli sport di squadra ogni nazione e' una riga-squadra in Athletes (es. 'ITA Men's Volley') e si usano i suoi punti; "
+    "nelle prove a squadre degli sport individuali (staffette, scherma a squadre) si sommano i punti dei migliori atleti; "
+    "le coppie sono formate dai due migliori atleti della stessa nazione.",
     "Il margine diventa una percentuale con una curva logistica: piu' mesi mancano alla chiusura delle qualificazioni, piu' la "
     "curva e' dolce; i punteggi di Athletes sono un'approssimazione del ranking ufficiale, quindi la curva e' ancora piu' prudente "
     "e la probabilita' non supera il 90% prima del Pass.",
