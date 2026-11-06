@@ -244,8 +244,8 @@ def val(page, *needles):
 
 
 def num(x):
-    if x in ("", None, False, True):
-        return None
+    if x is None or isinstance(x, bool) or (isinstance(x, str) and not x.strip()):
+        return None       # (attenzione: 1 == True in Python, per questo non si usa "x in (..., True)")
     try:
         return float(x)
     except (TypeError, ValueError):
