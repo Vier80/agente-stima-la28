@@ -1,0 +1,28 @@
+name: Esplora atleti LA28
+
+# Solo a tuo comando (Actions -> Esplora atleti LA28 -> Run workflow). Legge soltanto: non scrive nulla.
+on:
+  workflow_dispatch:
+
+jobs:
+  esplora:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installa il necessario
+        run: pip install -r requirements.txt
+      - name: Esplora i database Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: python -u esplora_athletes.py
+      - name: Conserva il resoconto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esplora-athletes
+          path: esplora_athletes.txt
+          if-no-files-found: ignore
