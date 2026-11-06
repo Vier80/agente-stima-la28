@@ -1,0 +1,70 @@
+name: Stima qualificazioni LA28
+
+# Si avvia a tuo comando (Actions -> Stima qualificazioni LA28 -> Run workflow)
+# e ogni giorno tramite cron-job.org, che chiama GitHub con solo_prova = false.
+on:
+  workflow_dispatch:
+    inputs:
+      solo_prova:
+        description: "Solo prova: calcola e mostra le stime nel log senza scrivere su Notion e senza pubblicare"
+        type: boolean
+        default: true
+
+concurrency:
+  group: stima-la28
+  cancel-in-progress: false
+
+jobs:
+  stima:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installa il necessario
+        run: pip install -r requirements.txt
+      - name: Calcola le stime
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          DRY_RUN: ${{ inputs.solo_prova }}
+        run: python -u stima_la28.py
+      - name: Conserva il file della pagina grafica
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stima-json
+          path: stima_la28.json
+          if-no-files-found: ignore
+      - name: Pubblica la pagina grafica
+        if: ${{ inputs.solo_prova != true }}
+        env:
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+        run: |
+          if [ -z "$PAGES_TOKEN" ]; then
+            echo "Il segreto PAGES_TOKEN non c'è: la pagina non viene aggiornata (stima_la28.json è scaricabile da Artifacts)."
+            exit 0
+          fi
+          git clone "https://x-access-token:${PAGES_TOKEN}@github.com/${{ github.repository_owner }}/map-q-la28.git" pagina
+          cp stima_la28.json pagina/stima_la28.json
+          cp stima.html pagina/stima.html
+          cd pagina
+          git config user.name "agente-stima-la28"
+          git config user.email "agente-stima-la28@users.noreply.github.com"
+          git add stima_la28.json stima.html
+          if git diff --cached --quiet; then
+            echo "Nessuna novità da pubblicare."
+          else
+            git commit -m "Aggiorna la stima delle qualificazioni LA28"
+            git push
+            # il sito si ripubblica solo quando parte il suo flusso "Aggiorna mappa LA28": lo avvio io
+            if GH_TOKEN="$PAGES_TOKEN" gh workflow run "Aggiorna mappa LA28" \
+                 --repo "${{ github.repository_owner }}/map-q-la28"; then
+              echo "Ho avviato la pubblicazione del sito: la pagina si aggiorna entro un paio di minuti."
+            else
+              echo "ATTENZIONE: i file sono stati salvati ma non sono riuscito ad avviare la pubblicazione del sito."
+              echo "Al token PAGES_TOKEN manca il permesso 'Actions: Read and write'. Intanto lancia a mano 'Aggiorna mappa LA28'."
+            fi
+          fi
