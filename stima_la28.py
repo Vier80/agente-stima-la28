@@ -90,6 +90,7 @@ METRICHE = {
     "Fencing": ("FEN", "punti"), "Boxing": ("WB", "punti"), "Wrestling": ("UWW", "punti"),
     "Weightlifting": ("KG", "punti"),
 }
+METRICHE_CANON = {sport_canonico(k) for k in METRICHE}
 BASE_POSIZIONE = 1_000_000.0   # per le colonne "posizione" il punteggio interno e' BASE - posizione
 
 
@@ -395,7 +396,8 @@ def leggi_athletes(dbs, log):
                             g, res, unita = parti_prova(ev, RULES[canon]["kind"])
                             # riga con una sola prova (anche coppia/squadra): il valore e' di quella prova;
                             # riga con piu' prove: lo si assegna solo alle prove individuali
-                            if unita == "ind" or len(eventi_riga) == 1:
+                            # (le squadre con valore 0 tengono i punti generici: la colonna dedicata per loro e' vuota)
+                            if unita == "ind" or (len(eventi_riga) == 1 and m[1] > 0):
                                 nuovi[ev] = m[1]
                     for ev, v in nuovi.items():
                         kev = parti_prova(ev, RULES[canon]["kind"])[:2]
@@ -663,7 +665,7 @@ def stima_generica(atleti, escludi_ids, log):
     """Una riga per ogni atleta (o squadra/coppia) italiano degli sport con regole, esclusi gli atleti gia' coperti
     dalle simulazioni dedicate. Restituisce (righe, id_coperti)."""
     gruppi = {}   # (sport canonico, genere, impronta della prova) -> {"label", "unita", "chiave", "membri": {noc: {id: (pts, atleta)}}}
-    non_olimpiche, duplicati = set(), set()
+    non_olimpiche, duplicati, zero_ids = set(), set(), set()
     for a in atleti:
         if not a["canon"] or a["sport"] in INVERNALI:
             continue
@@ -674,7 +676,11 @@ def stima_generica(atleti, escludi_ids, log):
             if primo:
                 prove = {primo: a["ptsq"]}
         for ev, pt in prove.items():
-            if pt <= 0 or ev.startswith("\U0001F534"):
+            if ev.startswith("\U0001F534"):
+                continue
+            if pt <= 0:
+                if a["canon"] in METRICHE_CANON and pt == 0 and a["ita"]:
+                    zero_ids.add(a["id"])     # colonna dedicata (WON/FEN/WB/UWW/KG) presente ma a zero: non e' in classifica
                 continue
             g, res, unita = parti_prova(ev, regola["kind"])
             chiave = f"{g}|{res}"
@@ -739,6 +745,8 @@ def stima_generica(atleti, escludi_ids, log):
                 continue
             for a in ita:
                 coperti.add(a["id"])
+            if u.get("fuori") and unita != "ind":
+                continue      # seconda formazione italiana oltre il limite: la riga della migliore c'e' gia'
             if regola["kind"] in ("team", "pair"):
                 for _, a in gr["membri"].get(u["noc"], []):
                     coperti.add(a["id"])      # tutta la rosa italiana presente in db appartiene a questa squadra
@@ -759,6 +767,8 @@ def stima_generica(atleti, escludi_ids, log):
             label = gr["label"]
             if unita == "ind":
                 nome, tipo = ita[0]["nome"], "Atleta"
+            elif u.get("entry") and "/" in ita[0]["nome"]:
+                nome, tipo = ita[0]["nome"], "Squadra"      # coppia/formazione indicata per nome (es. squadre miste del tiro)
             elif unita == "pair":
                 nome, tipo = " / ".join(a["nome"] for a in u["membri"]), "Squadra"
             else:
@@ -800,6 +810,13 @@ def stima_generica(atleti, escludi_ids, log):
             x = squadre_senza.setdefault((a["canon"], g), {"q": False, "n": 0})
             x["q"] = x["q"] or a["q"]
             x["n"] += 1
+        elif a["id"] in zero_ids and not a["q"] and a["canon"] in METRICHE_CANON:
+            righe.append(dict(sport=a["canon"], disciplina=disc[:100], nome=a["nome"],
+                              tipo="Squadra" if riga_squadra(a) else "Atleta", livello="Fuori", p=2.0, via="",
+                              rank=None, margine=None, stato="Senza punti nel ranking", pass_="",
+                              fine=regola["fine"].isoformat(),
+                              nota="nella colonna di riferimento (WON/FEN/WB/UWW/KG) ha 0 punti: non e' in classifica; "
+                                   "passa solo con una via diversa dal ranking"))
         elif a["id"] in non_olimpiche and not a["q"]:
             righe.append(dict(sport=a["canon"], disciplina=disc[:100], nome=a["nome"], tipo="Atleta", livello="Fuori",
                               p=1.0, via="", rank=None, margine=None, stato="Categoria non olimpica", pass_="",
@@ -938,6 +955,22 @@ def costruisci(tutti, sims, wrest, log):
         f"{len(non_abbinati)}")
     for a in non_abbinati[:40]:
         log(f"   - {a['sport']}: {a['nome']}")
+    # righe identiche (stesso sport, disciplina e nome): ne tengo una sola, quella con probabilita' piu' alta
+    migliori = {}
+    for r in righe:
+        k = (r["sport"], r["disciplina"], r["nome"])
+        if k not in migliori or (r.get("p") or 0) > (migliori[k].get("p") or 0):
+            migliori[k] = r
+    if len(migliori) < len(righe):
+        log(f"Righe doppie eliminate: {len(righe) - len(migliori)}")
+        visti, unici = set(), []
+        for r in righe:
+            k = (r["sport"], r["disciplina"], r["nome"])
+            if k in visti or migliori[k] is not r:
+                continue
+            visti.add(k)
+            unici.append(r)
+        righe = unici
     return righe
 
 
