@@ -390,9 +390,12 @@ def leggi_athletes(dbs, log):
                     if m[0] == "eventi":
                         nuovi = {ev: v for ev, v in m[1].items()}
                     else:
-                        for ev in [e for e in disc.split("|") if e and not e.startswith("\U0001F534")]:
+                        eventi_riga = [e for e in disc.split("|") if e and not e.startswith("\U0001F534")]
+                        for ev in eventi_riga:
                             g, res, unita = parti_prova(ev, RULES[canon]["kind"])
-                            if unita == "ind":
+                            # riga con una sola prova (anche coppia/squadra): il valore e' di quella prova;
+                            # riga con piu' prove: lo si assegna solo alle prove individuali
+                            if unita == "ind" or len(eventi_riga) == 1:
                                 nuovi[ev] = m[1]
                     for ev, v in nuovi.items():
                         kev = parti_prova(ev, RULES[canon]["kind"])[:2]
@@ -590,7 +593,7 @@ def parti_prova(testo, kind):
     else:
         g = ""
     res = re.sub(r"\b(women|men|womens|mens)('s)?\b|'s\b|\bmale\b|\bfemale\b", " ", t)
-    res = re.sub(r"\s+", " ", res).strip(" -/")
+    res = re.sub(r"\s+", " ", res.replace("'", " ")).strip(" -/")
     if kind in ("team", "pair"):
         unita = kind
         res = SPORT_WORDS.sub(" ", res)
@@ -659,7 +662,8 @@ def riga_squadra(a):
 def stima_generica(atleti, escludi_ids, log):
     """Una riga per ogni atleta (o squadra/coppia) italiano degli sport con regole, esclusi gli atleti gia' coperti
     dalle simulazioni dedicate. Restituisce (righe, id_coperti)."""
-    gruppi = {}   # (sport canonico, chiave prova) -> {"label", "unita", "membri": {noc: [(pts, atleta)]}}
+    gruppi = {}   # (sport canonico, genere, impronta della prova) -> {"label", "unita", "chiave", "membri": {noc: {id: (pts, atleta)}}}
+    non_olimpiche, duplicati = set(), set()
     for a in atleti:
         if not a["canon"] or a["sport"] in INVERNALI:
             continue
@@ -674,11 +678,27 @@ def stima_generica(atleti, escludi_ids, log):
                 continue
             g, res, unita = parti_prova(ev, regola["kind"])
             chiave = f"{g}|{res}"
-            gr = gruppi.setdefault((a["canon"], chiave), {"label": ev, "unita": unita, "g": g, "res": res, "membri": {}})
-            gr["membri"].setdefault(a["noc"], []).append((pt, a))
+            if regola.get("prove_valide") and not any(re.search(rx, chiave, re.I) for rx in regola["prove_valide"]):
+                non_olimpiche.add(a["id"])      # categoria che non e' in programma a LA28
+                continue
+            impronta_prova = "".join(sorted(res.replace(" ", "")))   # 'recurve individual' = 'individual recurve'
+            gr = gruppi.setdefault((a["canon"], g, impronta_prova),
+                                   {"label": ev, "unita": unita, "g": g, "res": res, "chiave": chiave, "membri": {}})
+            d = gr["membri"].setdefault(a["noc"], {})
+            kd = chiave_nome(a["nome"])          # lo stesso atleta puo' comparire in due pagine con la prova scritta in modo diverso
+            if kd not in d:
+                d[kd] = (pt, a)
+            else:
+                if a["id"] != d[kd][1]["id"]:
+                    duplicati.add(a["id"] if pt <= d[kd][0] else d[kd][1]["id"])
+                if pt > d[kd][0]:
+                    d[kd] = (pt, a)
+    for gr in gruppi.values():
+        gr["membri"] = {noc: list(dd.values()) for noc, dd in gr["membri"].items()}
     righe, coperti = [], set()
     senza_dati = {}
-    for (sport, chiave), gr in sorted(gruppi.items()):
+    for (sport, _g, _imp), gr in sorted(gruppi.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[1]["chiave"])):
+        chiave = gr["chiave"]
         regola = RULES[sport]
         unita, res, g = gr["unita"], gr["res"], gr["g"]
         quota = quota_prova(regola, chiave, unita)
@@ -770,6 +790,9 @@ def stima_generica(atleti, escludi_ids, log):
     for a in atleti:
         if not a["ita"] or not a["canon"] or a["sport"] in INVERNALI or a["id"] in coperti or a["id"] in escludi_ids:
             continue
+        if a["id"] in duplicati:
+            coperti.add(a["id"])      # doppione della stessa persona: la riga esiste gia' con l'altra pagina
+            continue
         regola = RULES[a["canon"]]
         disc = a["disc"].replace("|", ", ") if a["disc"] else a["canon"]
         if regola["kind"] in ("team", "pair"):
@@ -777,6 +800,11 @@ def stima_generica(atleti, escludi_ids, log):
             x = squadre_senza.setdefault((a["canon"], g), {"q": False, "n": 0})
             x["q"] = x["q"] or a["q"]
             x["n"] += 1
+        elif a["id"] in non_olimpiche and not a["q"]:
+            righe.append(dict(sport=a["canon"], disciplina=disc[:100], nome=a["nome"], tipo="Atleta", livello="Fuori",
+                              p=1.0, via="", rank=None, margine=None, stato="Categoria non olimpica", pass_="",
+                              fine=regola["fine"].isoformat(),
+                              nota="la categoria in cui compare in Athletes non e' in programma a LA28"))
         elif a["q"]:
             righe.append(dict(sport=a["canon"], disciplina=disc[:100], nome=a["nome"], tipo="Atleta", livello="Certo",
                               p=100.0, via="", rank=None, margine=None, stato="Pass LA28",
@@ -807,7 +835,7 @@ def stima_generica(atleti, escludi_ids, log):
     # diagnostica
     log(f"\nStima generica: {len(gruppi)} prove con almeno un punteggio, {len(righe)} righe italiane.")
     per_sport = {}
-    for (sport, _), gr in gruppi.items():
+    for (sport, _g, _imp), gr in gruppi.items():
         x = per_sport.setdefault(sport, [0, 0])
         x[0] += 1
         x[1] += sum(len(v) for v in gr["membri"].values())
