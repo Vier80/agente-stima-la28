@@ -40,7 +40,7 @@ RULES = {
                      quota_by=[("relay|staffetta", 12)], alias=["swimming", "swimmingpool"], team_size=4,
                      note="quota per gara da confermare: stimata a 32; staffette stimate a 12"),
     "Diving": dict(kind="ind", quota=16, max_noc=2, rank_share=0.75, fine=d("2028-05-31"),
-                   quota_by=[("synchro", 8)], alias=["diving"],
+                   quota_by=[("synch", 8)], alias=["diving"],
                    note="synchro: 8 coppie stimate"),
     "Shooting": dict(kind="ind", quota=28, max_noc=2, rank_share=0.6, fine=d("2028-05-01"),
                      alias=["shooting"]),

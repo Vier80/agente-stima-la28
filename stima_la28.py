@@ -142,24 +142,39 @@ def formatta_tempo(sec):
 
 
 def leggi_prestazioni(raw):
-    """Colonna PFM/SCORE -> ('eventi', {etichetta: (numero, testo)}) oppure ('num', (numero, testo)) oppure None.
-    Accetta 'Men's 100m: 9.95', 'Men's 400m Free: 3:45.12', piu' prove separate da ; | o a capo, oppure un solo valore."""
+    """Colonna PFM/SCORE -> ('eventi', {etichetta: (testo,)}) con valori etichettati ("Men's 100m: 9.95"),
+    oppure ('lista', [testo, ...]) con uno o piu' valori senza etichetta ("1:45.23" o "3:28.72;3:28.86"), oppure None."""
     if raw in ("", None) or isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
-        return ("num", (float(raw), f"{raw:g}"))
+        return ("lista", [f"{raw:g}"])
     testo = str(raw)
-    ev = {}
+    ev, lista = {}, []
     for seg in re.split(r"[\n;|]+", testo):
+        if not seg.strip():
+            continue
         m = RE_PREST.match(seg)
         if m:
-            ev[m.group("lab").strip(" ,")] = (a_numero(m.group("val")), m.group("val"))
+            ev[m.group("lab").strip(" ,")] = m.group("val")
+            continue
+        m = RE_SOLO.match(seg)
+        if m:
+            lista.append(m.group("val"))
     if ev:
         return ("eventi", ev)
-    m = RE_SOLO.match(testo.strip())
-    if m:
-        return ("num", (a_numero(m.group("val")), m.group("val")))
+    if lista:
+        return ("lista", lista)
     return None
+
+
+def secondi(tok, ev):
+    """Valore testuale -> numero. I tempi sono in secondi ('1:45.23' = 105.23). Maratona, marcia e mezza maratona sono
+    scritte 'h:mm.ss' ('2:27.55' = 2h27'55\")."""
+    if tok.count(":") == 1 and re.match(r"^\d+:\d{2}[.,]\d{2}$", tok) and re.search(r"marathon|walk|half|km", ev or "", re.I):
+        h, rest = tok.split(":")
+        mm, ss = rest.replace(",", ".").split(".")
+        return int(h) * 3600 + int(mm) * 60 + int(ss)
+    return a_numero(tok)
 
 
 def prova_di_campo(ev):
@@ -383,8 +398,12 @@ def parse_punti(testo):
 
 def assegna_prestazioni(raw, disc, canon, direzione, stat):
     """PFM/SCORE di un atleta -> {prova di Disciplina: (valore interno 'piu' alto = meglio', testo)}.
-    Si assegna solo alle prove individuali. Un valore senza etichetta vale solo se l'atleta ha una prova individuale sola
-    (per i tempi) oppure e' lo stesso per tutte le prove individuali (per i punteggi)."""
+    - SCORE (punti): vale per tutte le prove della riga (individuali, coppie, squadre).
+    - PFM (tempo/misto): vale per le prove individuali; le staffette restano coi punti generici.
+      Un valore senza etichetta e' assegnato alla prova individuale unica; se l'atleta ha piu' prove individuali e un solo
+      valore, lo si assegna alla prima prova elencata in Disciplina (la principale)."""
+    if raw in ("", None) or (isinstance(raw, str) and not raw.strip()):
+        return {}
     m = leggi_prestazioni(raw)
     if not m:
         stat["illeggibili"] = stat.get("illeggibili", 0) + 1
@@ -392,30 +411,45 @@ def assegna_prestazioni(raw, disc, canon, direzione, stat):
     kind = RULES[canon]["kind"]
     eventi_riga = [e for e in disc.split("|") if e and not e.startswith("\U0001F534")]
     ind = [e for e in eventi_riga if parti_prova(e, kind)[2] == "ind"]
-    coppie = {}
+    coppie = {}      # prova -> testo del valore
     if m[0] == "eventi":
-        for lab, vt in m[1].items():
+        for lab, tok in m[1].items():
             g, res, unita = parti_prova(lab, kind)
-            if unita != "ind":
+            if unita != "ind" and direzione != "punti":
                 continue
             imp = "".join(sorted(res.replace(" ", "")))
-            trovato = [e for e in ind if "".join(sorted(parti_prova(e, kind)[1].replace(" ", ""))) == imp
-                       and (not g or parti_prova(e, kind)[0] == g or not parti_prova(e, kind)[0])]
-            coppie[trovato[0] if trovato else lab] = vt
+            cand = ind if unita == "ind" else eventi_riga
+            trovato = [e for e in cand if "".join(sorted(parti_prova(e, kind)[1].replace(" ", ""))) == imp
+                       and (not g or not parti_prova(e, kind)[0] or parti_prova(e, kind)[0] == g)]
+            coppie[trovato[0] if trovato else lab] = tok
     else:
-        if direzione == "punti" or len(ind) == 1:
-            for e in ind:
-                coppie[e] = m[1]
-        else:
-            stat["senza_etichetta"] = stat.get("senza_etichetta", 0) + 1
-    out = {}
-    for ev, (v, txt) in coppie.items():
+        toks = m[1]
         if direzione == "punti":
-            out[ev] = (v, txt)
+            best = max(toks, key=lambda t: secondi(t, ""))
+            for e in eventi_riga:
+                coppie[e] = best
+        elif ind:
+            if len(toks) == len(ind) and len(ind) > 1:
+                for e, t in zip(ind, toks):
+                    coppie[e] = t
+            else:
+                e = ind[0]
+                campo = direzione == "misto" and prova_di_campo(e)
+                coppie[e] = (max if campo else min)(toks, key=lambda t: secondi(t, e))
+                if len(ind) > 1:
+                    stat["valore_alla_prima_prova"] = stat.get("valore_alla_prima_prova", 0) + 1
+                    esempi = stat.setdefault("esempi_prima_prova", [])
+                    if len(esempi) < 6:
+                        esempi.append(f"{disc[:60]} -> {e}")
+    out = {}
+    for ev, tok in coppie.items():
+        v = secondi(tok, ev)
+        if direzione == "punti":
+            out[ev] = (v, tok)
         elif direzione == "tempo" or (direzione == "misto" and not prova_di_campo(ev)):
-            out[ev] = (BASE_POSIZIONE - v, txt) if v > 0 else (0.0, txt)
+            out[ev] = (BASE_POSIZIONE - v, tok) if v > 0 else (0.0, tok)
         else:
-            out[ev] = (v, txt)
+            out[ev] = (v, tok)
     return out
 
 
@@ -691,7 +725,7 @@ def stima_sim(r, cut):
 PROXY_SIGMA = 1.4        # i punteggi di Athletes sono un'approssimazione del ranking ufficiale: curva piu' dolce
 ALT_SHARE = 0.30         # parte dei posti non-ranking che un atleta "vicino" puo' ancora intercettare
 PARSE_TEAM = re.compile(r"team|relay|group|squad|eight|four|quad|8\+|4x|4-|squadra", re.I)
-PARSE_PAIR = re.compile(r"doubles|duet|synchro|pair|double|2x|2-|coppia", re.I)
+PARSE_PAIR = re.compile(r"doubles|duet|synch|pair|double|2x|2-|coppia", re.I)
 SPORT_WORDS = re.compile(r"beach\s*volley\w*|volley\w*|basket\w*|football|cricket|hockey|rugby|handball|polo|"
                          r"baseball|softball|lacrosse|flag", re.I)
 IT_GENERE = {"M": "uomini", "W": "donne", "X": "misto", "": ""}
