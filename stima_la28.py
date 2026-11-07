@@ -150,7 +150,7 @@ def leggi_prestazioni(raw):
         return ("lista", [f"{raw:g}"])
     testo = str(raw)
     ev, lista = {}, []
-    for seg in re.split(r"[\n;|]+", testo):
+    for seg in re.split(r"[\n;|]+|,\s+", testo):
         if not seg.strip():
             continue
         m = RE_PREST.match(seg)
@@ -244,7 +244,7 @@ def flat(p, depth=0):
         if not v:
             return ""
         if v.get("type") == "array":
-            return ";".join(str(flat(x, depth + 1)) for x in v["array"][:6])
+            return ";".join(str(flat(x, depth + 1)) for x in v["array"][:40])
         return flat(v, depth + 1)
     if t in ("string", "boolean"):
         return v
@@ -455,44 +455,77 @@ def chiave_prova(canon, ev):
 
 
 def risolvi_ambigui(ambigui, valori, log):
-    """Atleti con piu' prove individuali e un solo valore PFM senza etichetta: il valore e' assegnato alla prova in cui e'
-    piu' plausibile, cioe' quella il cui valore tipico (mediana degli atleti con una sola prova) e' piu' vicino."""
-    n_ok, n_prima, esempi = 0, 0, []
-    for rec, canon, toks, ind, direzione in ambigui:
-        meglio = None
+    """Atleti con piu' prove individuali e una lista di valori PFM senza etichetta (i migliori tempi/misure di tutte le loro
+    prove, in ordine sparso): ogni valore e' assegnato alla prova il cui valore tipico (mediana degli atleti con una sola prova)
+    e' piu' vicino; per ogni prova si tiene poi il migliore. Valori troppo lontani da ogni prova si scartano."""
+    SOGLIA = math.log(1.35)
+
+    def mediane(canon, ind):
+        med = {}
         for e in ind:
             v_tip = sorted(valori.get(chiave_prova(canon, e), []))
-            if len(v_tip) < 3:
+            if len(v_tip) >= 3:
+                med[e] = v_tip[len(v_tip) // 2]
+        return med
+
+    # passo 1: per le prove senza valori di confronto (nessun atleta con quella prova sola) si usano i valori "orfani"
+    # di chi ha una sola prova senza mediana: tutto cio' che non somiglia alle altre sue prove appartiene a quella
+    for _ in range(2):
+        for rec, canon, toks, ind, direzione in ambigui:
+            med = mediane(canon, ind)
+            mancanti = [e for e in ind if e not in med]
+            if len(mancanti) != 1:
                 continue
-            med = v_tip[len(v_tip) // 2]
+            orfani = []
             for t in toks:
-                v = secondi(t, e)
-                if v <= 0 or med <= 0:
-                    continue
-                dist = abs(math.log(v / med))
-                if meglio is None or dist < meglio[0]:
-                    meglio = (dist, e, t)
-        if meglio:
-            _d, e, t = meglio
+                vicino = any(secondi(t, e) > 0 and abs(math.log(secondi(t, e) / m)) <= SOGLIA for e, m in med.items())
+                if not vicino:
+                    orfani.append(t)
+            if orfani:
+                e = mancanti[0]
+                campo = direzione == "misto" and prova_di_campo(e)
+                valori.setdefault(chiave_prova(canon, e), []).append(
+                    secondi((max if campo else min)(orfani, key=lambda x: secondi(x, e)), e))
+    n_ok, n_prima, esempi = 0, 0, []
+    for rec, canon, toks, ind, direzione in ambigui:
+        med = mediane(canon, ind)
+        per_prova = {}
+        if med:
+            for t in toks:
+                scelta = None
+                for e, m in med.items():
+                    v = secondi(t, e)
+                    if v > 0 and m > 0:
+                        dist = abs(math.log(v / m))
+                        if scelta is None or dist < scelta[0]:
+                            scelta = (dist, e)
+                if scelta and scelta[0] <= SOGLIA:
+                    per_prova.setdefault(scelta[1], []).append(t)
             n_ok += 1
-        else:
-            e, t = ind[0], toks[0]
+        if not per_prova:
+            e = ind[0]
+            campo = direzione == "misto" and prova_di_campo(e)
+            per_prova[e] = [(max if campo else min)(toks, key=lambda t: secondi(t, e))]
             n_prima += 1
-        v = secondi(t, e)
-        if direzione == "tempo" or (direzione == "misto" and not prova_di_campo(e)):
-            interno = BASE_POSIZIONE - v if v > 0 else 0.0
-        else:
-            interno = v
-        kev = parti_prova(e, RULES[canon]["kind"])[:2]
-        for vecchio in [x for x in rec["pts"] if parti_prova(x, RULES[canon]["kind"])[:2] == kev]:
-            del rec["pts"][vecchio]
-        rec["pts"][e] = interno
-        rec["pt_txt"][e] = f"PFM {t}"
-        if rec["ita"] and len(esempi) < 8:
-            esempi.append(f"{rec['nome']}: {t} -> {e} (prove: {', '.join(ind)[:70]})")
+        for e, tl in per_prova.items():
+            campo = direzione == "misto" and prova_di_campo(e)
+            t = (max if campo else min)(tl, key=lambda x: secondi(x, e))
+            v = secondi(t, e)
+            if direzione == "tempo" or (direzione == "misto" and not campo):
+                interno = BASE_POSIZIONE - v if v > 0 else 0.0
+            else:
+                interno = v
+            kev = parti_prova(e, RULES[canon]["kind"])[:2]
+            for vecchio in [x for x in rec["pts"] if parti_prova(x, RULES[canon]["kind"])[:2] == kev]:
+                del rec["pts"][vecchio]
+            rec["pts"][e] = interno
+            rec["pt_txt"][e] = f"PFM {t}"
+        if rec["ita"] and len(esempi) < 10:
+            esempi.append(f"{rec['nome']}: " + "; ".join(f"{e} = {rec['pt_txt'][e][4:]}" for e in per_prova)
+                          + f"  (valori in lista: {len(toks)}, prove: {len(ind)})")
     if ambigui:
-        log(f"PFM con piu' prove e un solo valore: {n_ok} assegnati alla prova piu' plausibile, "
-            f"{n_prima} alla prima prova (mancano valori di confronto)")
+        log(f"PFM con piu' prove e lista di valori: {n_ok} atleti smistati per prova, {n_prima} alla prima prova "
+            f"(mancano valori di confronto)")
         for x in esempi:
             log("      " + x)
 
