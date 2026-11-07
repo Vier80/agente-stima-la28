@@ -89,8 +89,15 @@ METRICHE = {
     "Sport Climbing": ("WON", "punti"), "Archery": ("WON", "punti"), "Triathlon": ("WON", "punti"),
     "Fencing": ("FEN", "punti"), "Boxing": ("WB", "punti"), "Wrestling": ("UWW", "punti"),
     "Weightlifting": ("KG", "punti"),
+    "Golf": ("WON", "punti"),
+    "Diving": ("SCORE", "punti"), "Artistic Swimming": ("SCORE", "punti"),
+    "Swimming": ("PFM", "tempo"),       # tempo: il valore piu' basso e' il migliore
+    "Athletics": ("PFM", "misto"),      # misto: corsa/marcia/staffette = piu' basso, concorsi (salti, lanci) e prove multiple = piu' alto
 }
+# sport in cui i "Punti per Disciplina" generici NON vanno usati per le prove individuali (conta solo la colonna dedicata)
+STRETTE = {"Archery", "Golf", "Diving", "Artistic Swimming", "Swimming", "Athletics"}
 METRICHE_CANON = {sport_canonico(k) for k in METRICHE}
+STRETTE_CANON = {sport_canonico(k) for k in STRETTE}
 BASE_POSIZIONE = 1_000_000.0   # per le colonne "posizione" il punteggio interno e' BASE - posizione
 
 
@@ -99,11 +106,64 @@ def sigla_colonna(nome):
 
 
 def trova_metrica(props, sigla):
-    """Colonna di Athletes la cui sigla (solo lettere/numeri ASCII) e' esattamente quella indicata; evita le varianti in %."""
+    """Colonna di Athletes la cui sigla (solo lettere/numeri ASCII) e' esattamente quella indicata; evita le varianti in %.
+    Se non esiste una colonna con quella sigla esatta, ripiega su una che inizia con la sigla (es. 'PFM A')."""
     for k in props:
         if sigla_colonna(k) == sigla and "\uff05" not in k and "%" not in k:
             return k
+    for k in props:
+        sc = sigla_colonna(k)
+        if sc.startswith(sigla) and len(sc) <= len(sigla) + 2 and "\uff05" not in k and "%" not in k:
+            return k
     return None
+
+
+RE_VAL = r"\d+:\d{2}:\d{2}(?:[.,]\d+)?|\d+:\d{2}(?:[.,]\d+)?|\d+(?:[.,]\d+)?"
+RE_PREST = re.compile(r"^\s*(?P<lab>[^:=]*?[A-Za-z][^:=]*?)\s*[:=]\s*(?P<val>" + RE_VAL + r")\s*[A-Za-z%\.]{0,4}\s*$")
+RE_SOLO = re.compile(r"^\s*(?P<val>" + RE_VAL + r")\s*[A-Za-z%\.]{0,4}\s*$")
+CAMPO = re.compile(r"jump|vault|throw|put|discus|hammer|javelin|shot|decathlon|heptathlon|pentathlon|salto|lancio|getto|asta|peso|disco|martello|giavellotto", re.I)
+
+
+def a_numero(tok):
+    """'1:45.23' -> 105.23 (secondi); '48,12' -> 48.12; '2:05:11' -> 7511."""
+    parti = tok.replace(",", ".").split(":")
+    v = 0.0
+    for p in parti:
+        v = v * 60 + float(p)
+    return v
+
+
+def formatta_tempo(sec):
+    if sec >= 3600:
+        return f"{int(sec // 3600)}:{int(sec % 3600 // 60):02d}:{sec % 60:05.2f}"
+    if sec >= 60:
+        return f"{int(sec // 60)}:{sec % 60:05.2f}"
+    return f"{sec:.2f}"
+
+
+def leggi_prestazioni(raw):
+    """Colonna PFM/SCORE -> ('eventi', {etichetta: (numero, testo)}) oppure ('num', (numero, testo)) oppure None.
+    Accetta 'Men's 100m: 9.95', 'Men's 400m Free: 3:45.12', piu' prove separate da ; | o a capo, oppure un solo valore."""
+    if raw in ("", None) or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return ("num", (float(raw), f"{raw:g}"))
+    testo = str(raw)
+    ev = {}
+    for seg in re.split(r"[\n;|]+", testo):
+        m = RE_PREST.match(seg)
+        if m:
+            ev[m.group("lab").strip(" ,")] = (a_numero(m.group("val")), m.group("val"))
+    if ev:
+        return ("eventi", ev)
+    m = RE_SOLO.match(testo.strip())
+    if m:
+        return ("num", (a_numero(m.group("val")), m.group("val")))
+    return None
+
+
+def prova_di_campo(ev):
+    return bool(CAMPO.search(ev or ""))
 
 
 def leggi_metrica(raw):
@@ -321,6 +381,44 @@ def parse_punti(testo):
     return out
 
 
+def assegna_prestazioni(raw, disc, canon, direzione, stat):
+    """PFM/SCORE di un atleta -> {prova di Disciplina: (valore interno 'piu' alto = meglio', testo)}.
+    Si assegna solo alle prove individuali. Un valore senza etichetta vale solo se l'atleta ha una prova individuale sola
+    (per i tempi) oppure e' lo stesso per tutte le prove individuali (per i punteggi)."""
+    m = leggi_prestazioni(raw)
+    if not m:
+        stat["illeggibili"] = stat.get("illeggibili", 0) + 1
+        return {}
+    kind = RULES[canon]["kind"]
+    eventi_riga = [e for e in disc.split("|") if e and not e.startswith("\U0001F534")]
+    ind = [e for e in eventi_riga if parti_prova(e, kind)[2] == "ind"]
+    coppie = {}
+    if m[0] == "eventi":
+        for lab, vt in m[1].items():
+            g, res, unita = parti_prova(lab, kind)
+            if unita != "ind":
+                continue
+            imp = "".join(sorted(res.replace(" ", "")))
+            trovato = [e for e in ind if "".join(sorted(parti_prova(e, kind)[1].replace(" ", ""))) == imp
+                       and (not g or parti_prova(e, kind)[0] == g or not parti_prova(e, kind)[0])]
+            coppie[trovato[0] if trovato else lab] = vt
+    else:
+        if direzione == "punti" or len(ind) == 1:
+            for e in ind:
+                coppie[e] = m[1]
+        else:
+            stat["senza_etichetta"] = stat.get("senza_etichetta", 0) + 1
+    out = {}
+    for ev, (v, txt) in coppie.items():
+        if direzione == "punti":
+            out[ev] = (v, txt)
+        elif direzione == "tempo" or (direzione == "misto" and not prova_di_campo(ev)):
+            out[ev] = (BASE_POSIZIONE - v, txt) if v > 0 else (0.0, txt)
+        else:
+            out[ev] = (v, txt)
+    return out
+
+
 def leggi_athletes(dbs, log):
     """Legge Athletes a fette per sport (Notion non restituisce piu' di 10000 righe per interrogazione).
     Per gli sport con regole legge tutte le nazioni; per gli altri solo gli italiani."""
@@ -355,6 +453,8 @@ def leggi_athletes(dbs, log):
     col_metrica = {}
     for sp, (sigla, _) in METRICHE.items():
         col_metrica[sp] = trova_metrica(pr0, sigla)
+        if col_metrica[sp] is None:
+            log(f"ATTENZIONE: per {sp} non trovo la colonna {sigla} in Athletes")
     log("Colonne dedicate per sport: " + ", ".join(f"{sp}={col_metrica[sp]!r}" for sp in METRICHE))
     campioni = {}
     for o, flt, completo in letture:
@@ -376,12 +476,24 @@ def leggi_athletes(dbs, log):
             canon = sport_canonico(o)
             disc = flat(pr[dk]) if dk else ""
             pts = parse_punti(flat(pr[pdk]) if pdk else "")
-            pt_txt = {}
+            pt_txt, assegnati = {}, set()
             if canon in METRICHE and col_metrica.get(canon) and col_metrica[canon] in pr:
                 sigla, direzione = METRICHE[canon]
                 raw = flat(pr[col_metrica[canon]])
-                m = leggi_metrica(raw)
-                cs = campioni.setdefault(canon, {"ita": [], "altri": [], "num": []})
+                cs = campioni.setdefault(canon, {"ita": [], "altri": [], "num": [], "stat": {}})
+                if sigla in ("PFM", "SCORE"):
+                    m = None
+                    for ev, (interno, txt) in assegna_prestazioni(raw, disc, canon, direzione, cs["stat"]).items():
+                        kev = parti_prova(ev, RULES[canon]["kind"])[:2]
+                        for vecchio in [e for e in pts if parti_prova(e, RULES[canon]["kind"])[:2] == kev]:
+                            del pts[vecchio]
+                        pts[ev] = interno
+                        pt_txt[ev] = f"{sigla} {txt}"
+                        assegnati.add(ev)
+                        if direzione != "misto":
+                            cs["num"].append(interno if direzione == "punti" else BASE_POSIZIONE - interno)
+                else:
+                    m = leggi_metrica(raw)
                 if len(cs["ita" if ita else "altri"]) < 4 and raw not in ("", None):
                     cs["ita" if ita else "altri"].append(f"{nome} [{disc[:30]}] {sigla}={str(raw)[:50]}")
                 if m:
@@ -400,6 +512,7 @@ def leggi_athletes(dbs, log):
                             if unita == "ind" or (len(eventi_riga) == 1 and m[1] > 0):
                                 nuovi[ev] = m[1]
                     for ev, v in nuovi.items():
+                        assegnati.add(ev)
                         kev = parti_prova(ev, RULES[canon]["kind"])[:2]
                         for vecchio in [e for e in pts if parti_prova(e, RULES[canon]["kind"])[:2] == kev]:
                             del pts[vecchio]       # la colonna dedicata sostituisce i punti generici della stessa prova
@@ -409,6 +522,10 @@ def leggi_athletes(dbs, log):
                         else:
                             pts[ev] = v
                             pt_txt[ev] = f"{v:g} {sigla}"
+            if canon in STRETTE_CANON:
+                # solo la colonna dedicata conta per le prove individuali: i punti generici restano solo per le prove a squadre/coppie
+                pts = {e: v for e, v in pts.items()
+                       if e in assegnati or parti_prova(e, RULES[canon]["kind"])[2] != "ind"}
             out.append({"id": p["id"], "nome": nome, "sport": "" if o == "(senza sport)" else o,
                         "canon": canon, "noc": noc, "ita": ita,
                         "disc": disc, "pass": pas, "q": is_q(pas),
@@ -419,6 +536,8 @@ def leggi_athletes(dbs, log):
         nums = sorted(cs["num"])
         rng = f"valori numerici {nums[0]:g} .. {nums[-1]:g} (mediana {nums[len(nums)//2]:g}), n={len(nums)}" if nums else "nessun valore numerico"
         log(f"Colonna {METRICHE[sp][0]} per {sp} ({METRICHE[sp][1]}): {rng}")
+        if cs.get("stat"):
+            log(f"      note di lettura: {cs['stat']}")
         for r in cs["ita"] + cs["altri"]:
             log("      " + r)
     log(f"Athletes: {len(out)} atleti letti, di cui italiani {sum(1 for x in out if x['ita'])}. "
@@ -671,7 +790,7 @@ def stima_generica(atleti, escludi_ids, log):
             continue
         regola = RULES[a["canon"]]
         prove = dict(a["pts"])
-        if not prove and a["ptsq"] and a["ptsq"] > 0:
+        if not prove and a["ptsq"] and a["ptsq"] > 0 and a["canon"] not in STRETTE_CANON:
             primo = (a["disc"].split("|")[0] if a["disc"] else "")
             if primo:
                 prove = {primo: a["ptsq"]}
@@ -1106,6 +1225,10 @@ METODO = [
     "alla soglia conserva una piccola chance residua.",
     "Livelli: Probabile 70% o piu', Possibile 35-69%, Remoto 8-34%, Fuori sotto l'8%. Se mancano punteggi o ranking l'agente "
     "scrive 'Dati insufficienti' invece di inventare un numero.",
+    "Per alcuni sport il punteggio non e' la colonna 'Punti per Disciplina' ma una colonna dedicata di Athletes: WON (badminton, "
+    "tennis tavolo, vela, arrampicata, arco individuale, triathlon, golf), FEN (scherma), WB (pugilato), UWW (lotta), KG (pesi), "
+    "SCORE (tuffi, nuoto artistico), PFM (nuoto e atletica: tempo piu' basso = meglio per nuoto, corsa, marcia; misura piu' alta = "
+    "meglio per salti, lanci e prove multiple).",
     "Atletica: quote e standard sono provvisori fino a dicembre 2026. E' una stima euristica per orientarsi, non un calcolo "
     "ufficiale: i regolamenti completi sono sul sito del CIO.",
 ]
