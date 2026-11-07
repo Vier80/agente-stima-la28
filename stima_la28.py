@@ -403,11 +403,11 @@ def assegna_prestazioni(raw, disc, canon, direzione, stat):
       Un valore senza etichetta e' assegnato alla prova individuale unica; se l'atleta ha piu' prove individuali e un solo
       valore, lo si assegna alla prima prova elencata in Disciplina (la principale)."""
     if raw in ("", None) or (isinstance(raw, str) and not raw.strip()):
-        return {}
+        return {}, None
     m = leggi_prestazioni(raw)
     if not m:
         stat["illeggibili"] = stat.get("illeggibili", 0) + 1
-        return {}
+        return {}, None
     kind = RULES[canon]["kind"]
     eventi_riga = [e for e in disc.split("|") if e and not e.startswith("\U0001F534")]
     ind = [e for e in eventi_riga if parti_prova(e, kind)[2] == "ind"]
@@ -429,18 +429,14 @@ def assegna_prestazioni(raw, disc, canon, direzione, stat):
             for e in eventi_riga:
                 coppie[e] = best
         elif ind:
-            if len(toks) == len(ind) and len(ind) > 1:
-                for e, t in zip(ind, toks):
-                    coppie[e] = t
-            else:
+            if len(ind) == 1:
                 e = ind[0]
                 campo = direzione == "misto" and prova_di_campo(e)
                 coppie[e] = (max if campo else min)(toks, key=lambda t: secondi(t, e))
-                if len(ind) > 1:
-                    stat["valore_alla_prima_prova"] = stat.get("valore_alla_prima_prova", 0) + 1
-                    esempi = stat.setdefault("esempi_prima_prova", [])
-                    if len(esempi) < 6:
-                        esempi.append(f"{disc[:60]} -> {e}")
+            else:
+                # piu' prove individuali e valori non etichettati: a quale prova appartiene lo decide dopo, confrontando
+                # il valore con quelli tipici di ogni prova (vedi risolvi_ambigui)
+                return {}, (toks, ind, direzione)
     out = {}
     for ev, tok in coppie.items():
         v = secondi(tok, ev)
@@ -450,7 +446,55 @@ def assegna_prestazioni(raw, disc, canon, direzione, stat):
             out[ev] = (BASE_POSIZIONE - v, tok) if v > 0 else (0.0, tok)
         else:
             out[ev] = (v, tok)
-    return out
+    return out, None
+
+
+def chiave_prova(canon, ev):
+    g, res, _u = parti_prova(ev, RULES[canon]["kind"])
+    return (canon, g, "".join(sorted(res.replace(" ", ""))))
+
+
+def risolvi_ambigui(ambigui, valori, log):
+    """Atleti con piu' prove individuali e un solo valore PFM senza etichetta: il valore e' assegnato alla prova in cui e'
+    piu' plausibile, cioe' quella il cui valore tipico (mediana degli atleti con una sola prova) e' piu' vicino."""
+    n_ok, n_prima, esempi = 0, 0, []
+    for rec, canon, toks, ind, direzione in ambigui:
+        meglio = None
+        for e in ind:
+            v_tip = sorted(valori.get(chiave_prova(canon, e), []))
+            if len(v_tip) < 3:
+                continue
+            med = v_tip[len(v_tip) // 2]
+            for t in toks:
+                v = secondi(t, e)
+                if v <= 0 or med <= 0:
+                    continue
+                dist = abs(math.log(v / med))
+                if meglio is None or dist < meglio[0]:
+                    meglio = (dist, e, t)
+        if meglio:
+            _d, e, t = meglio
+            n_ok += 1
+        else:
+            e, t = ind[0], toks[0]
+            n_prima += 1
+        v = secondi(t, e)
+        if direzione == "tempo" or (direzione == "misto" and not prova_di_campo(e)):
+            interno = BASE_POSIZIONE - v if v > 0 else 0.0
+        else:
+            interno = v
+        kev = parti_prova(e, RULES[canon]["kind"])[:2]
+        for vecchio in [x for x in rec["pts"] if parti_prova(x, RULES[canon]["kind"])[:2] == kev]:
+            del rec["pts"][vecchio]
+        rec["pts"][e] = interno
+        rec["pt_txt"][e] = f"PFM {t}"
+        if rec["ita"] and len(esempi) < 8:
+            esempi.append(f"{rec['nome']}: {t} -> {e} (prove: {', '.join(ind)[:70]})")
+    if ambigui:
+        log(f"PFM con piu' prove e un solo valore: {n_ok} assegnati alla prova piu' plausibile, "
+            f"{n_prima} alla prima prova (mancano valori di confronto)")
+        for x in esempi:
+            log("      " + x)
 
 
 def leggi_athletes(dbs, log):
@@ -491,6 +535,7 @@ def leggi_athletes(dbs, log):
             log(f"ATTENZIONE: per {sp} non trovo la colonna {sigla} in Athletes")
     log("Colonne dedicate per sport: " + ", ".join(f"{sp}={col_metrica[sp]!r}" for sp in METRICHE))
     campioni = {}
+    valori_prova, ambigui = {}, []
     for o, flt, completo in letture:
         pagine = query(d["id"], flt)
         n_it = 0
@@ -510,14 +555,19 @@ def leggi_athletes(dbs, log):
             canon = sport_canonico(o)
             disc = flat(pr[dk]) if dk else ""
             pts = parse_punti(flat(pr[pdk]) if pdk else "")
-            pt_txt, assegnati = {}, set()
+            pt_txt, assegnati, amb_pending = {}, set(), None
             if canon in METRICHE and col_metrica.get(canon) and col_metrica[canon] in pr:
                 sigla, direzione = METRICHE[canon]
                 raw = flat(pr[col_metrica[canon]])
                 cs = campioni.setdefault(canon, {"ita": [], "altri": [], "num": [], "stat": {}})
                 if sigla in ("PFM", "SCORE"):
                     m = None
-                    for ev, (interno, txt) in assegna_prestazioni(raw, disc, canon, direzione, cs["stat"]).items():
+                    ris, amb = assegna_prestazioni(raw, disc, canon, direzione, cs["stat"])
+                    if amb:
+                        amb_pending = (canon,) + amb
+                    for ev, (interno, txt) in ris.items():
+                        if direzione != "punti":
+                            valori_prova.setdefault(chiave_prova(canon, ev), []).append(secondi(txt, ev))
                         kev = parti_prova(ev, RULES[canon]["kind"])[:2]
                         for vecchio in [e for e in pts if parti_prova(e, RULES[canon]["kind"])[:2] == kev]:
                             del pts[vecchio]
@@ -564,8 +614,11 @@ def leggi_athletes(dbs, log):
                         "canon": canon, "noc": noc, "ita": ita,
                         "disc": disc, "pass": pas, "q": is_q(pas),
                         "pts": pts, "ptsq": ptsq, "pt_txt": pt_txt})
+            if amb_pending:
+                ambigui.append((out[-1], amb_pending[0], amb_pending[1], amb_pending[2], amb_pending[3]))
         log(f"   {o:<24} {len(pagine):>5} atleti letti ({'tutte le nazioni' if completo else 'solo italiani'}), "
             f"italiani {n_it}")
+    risolvi_ambigui(ambigui, valori_prova, log)
     for sp, cs in sorted(campioni.items()):
         nums = sorted(cs["num"])
         rng = f"valori numerici {nums[0]:g} .. {nums[-1]:g} (mediana {nums[len(nums)//2]:g}), n={len(nums)}" if nums else "nessun valore numerico"
