@@ -255,10 +255,12 @@ def die(msg):
 
 
 # --------------------------------------------------------------------------- Notion
-def call(method, path, body=None):
+def call(method, path, body=None, versione=None):
+    """Chiamata all'API di Notion. versione: per i database con piu' origini dati serve la versione 2025-09-03."""
     last = ""
+    head = dict(HEAD, **({"Notion-Version": versione} if versione else {}))
     for attempt in range(6):
-        r = requests.request(method, API + path, headers=HEAD, json=body, timeout=60)
+        r = requests.request(method, API + path, headers=head, json=body, timeout=60)
         if r.status_code == 429:
             time.sleep(float(r.headers.get("Retry-After", "2")) + 0.5)
             continue
@@ -851,6 +853,9 @@ def leggi_wrestling(db, log):
 # Per ogni prova del programma in cui in Athletes (e nelle simulazioni) non c'e' nessun atleta o squadra italiana,
 # l'agente scrive comunque una riga "Fuori", cosi' la pagina mostra tutto il programma.
 PROGRAMMA_DB = "2c5f48c9aad980b690d5e1aa2ce386b4"
+# il db ha due origini dati: si legge quella con le prove (serve la versione 2025-09-03 dell'API, quella vecchia non lo vede)
+PROGRAMMA_DS = "2c5f48c9aad980ae9bed000b638276c7"
+API_DATA_SOURCES = "2025-09-03"
 PROGRAMMA_TITOLI = ["home of the olympic games"]
 PROGRAMMA_TIPO = "Olympic Sport Program"
 
@@ -932,12 +937,23 @@ def stessa_prova(a, b):
 
 
 def leggi_programma(dbs, log):
-    d = trova_db(dbs, PROGRAMMA_TITOLI, PROGRAMMA_DB)
-    if not d:
-        log("ATTENZIONE: non trovo il db del programma olimpico ('HOME OF THE OLYMPIC GAMES'): le prove senza italiani "
-            "non vengono aggiunte. Collega il db alla connessione Notion dell'agente.")
-        return None
-    pr0 = d["properties"]
+    """Prove estive del programma LA28. Prima prova l'origine dati del programma con l'API nuova (il db ha due origini
+    dati), poi il db per ID/titolo con l'API vecchia."""
+    pr0, pagine, fonte = None, None, ""
+    try:
+        ds = call("GET", f"/data_sources/{PROGRAMMA_DS}", versione=API_DATA_SOURCES)
+        pr0 = ds["properties"]
+        fonte = plain(ds.get("title")) or "programma LA28"
+    except RuntimeError as e:
+        log(f"Programma LA28: origine dati non leggibile con l'API nuova ({str(e)[:160]})")
+    d = None
+    if pr0 is None:
+        d = trova_db(dbs, PROGRAMMA_TITOLI, PROGRAMMA_DB)
+        if not d:
+            log("ATTENZIONE: non trovo il db del programma olimpico ('HOME OF THE OLYMPIC GAMES'): le prove senza "
+                "italiani non vengono aggiunte. Collega il db alla connessione Notion dell'agente.")
+            return None
+        pr0, fonte = d["properties"], plain(d.get("title"))
     tk = prop(pr0, "Tipo", tipo="select")
     sk = prop(pr0, "Season", "Stagione", tipo="select")
     spk = prop(pr0, "Sport", tipo="select")
@@ -945,15 +961,30 @@ def leggi_programma(dbs, log):
     if not (tk and spk and dk):
         log(f"ATTENZIONE: nel db del programma non trovo le colonne Tipo/Sport/Disciplina: {list(pr0)[:30]}")
         return None
+    flt = {"property": tk, "select": {"equals": PROGRAMMA_TIPO}}
+    if d is None:
+        pagine, cur = [], None
+        while True:
+            body = {"page_size": 100, "filter": flt}
+            if cur:
+                body["start_cursor"] = cur
+            r = call("POST", f"/data_sources/{PROGRAMMA_DS}/query", body, versione=API_DATA_SOURCES)
+            pagine += r["results"]
+            if not r.get("has_more"):
+                break
+            cur = r["next_cursor"]
+    else:
+        pagine = query(d["id"], flt)
     out = []
-    for p in query(d["id"], {"property": tk, "select": {"equals": PROGRAMMA_TIPO}}):
+    for p in pagine:
         pr = p["properties"]
-        if sk and "winter" in str(flat(pr[sk])).lower():
+        if sk and sk in pr and "winter" in str(flat(pr[sk])).lower():
             continue
-        sp, di = flat(pr[spk]).strip(), flat(pr[dk]).strip()
+        sp = flat(pr[spk]).strip() if spk in pr else ""
+        di = flat(pr[dk]).strip() if dk in pr else ""
         if sp and di and sp not in INVERNALI:
             out.append((sp, di))
-    log(f"Programma LA28: {len(out)} prove estive lette dal db '{plain(d.get('title'))}'.")
+    log(f"Programma LA28: {len(out)} prove estive lette da '{fonte}'.")
     return out
 
 
