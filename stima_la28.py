@@ -148,7 +148,11 @@ METRICHE = {
 STRETTE = {"Archery", "Golf", "Diving", "Artistic Swimming", "Swimming", "Athletics"}
 METRICHE_CANON = {sport_canonico(k) for k in METRICHE}
 STRETTE_CANON = {sport_canonico(k) for k in STRETTE}
-BASE_POSIZIONE = 1_000_000.0   # per le colonne "posizione" il punteggio interno e' BASE - posizione
+BASE_POSIZIONE = 1_000_000.0
+# Atleti ritirati: in Athletes la colonna "Honours" contiene l'opzione "⛔️Retired". Non entrano in nessuna classifica
+# (nemmeno quelli delle altre nazioni, cosi' non occupano posti) e le loro righe di simulazione non vengono scritte.
+PAROLE_RITIRO = ("retired", "ritirat")
+RITIRATI_ITA = []          # riempita da leggi_athletes: italiani ritirati (servono per scartare le righe di simulazione)   # per le colonne "posizione" il punteggio interno e' BASE - posizione
 
 
 def sigla_colonna(nome):
@@ -647,6 +651,8 @@ def leggi_athletes(dbs, log):
     dk = prop(pr0, "Disciplina", tipo="multi_select")
     pdk = prop(pr0, "Punti per Disciplina")
     qk = prop(pr0, "PTS Q")
+    hk = prop(pr0, "Honours", tipo="multi_select")
+    n_ritirati = 0
     col_metrica = {}
     for sp, (sigla, _) in METRICHE.items():
         col_metrica[sp] = trova_metrica(pr0, sigla)
@@ -667,6 +673,12 @@ def leggi_athletes(dbs, log):
             noc = flat(pr[noc_k])
             pas = flat(pr[pk]) if pk else ""
             ita = "ITA" in (noc or "").upper()
+            if hk and any(w in flat(pr[hk]).lower() for w in PAROLE_RITIRO):
+                n_ritirati += 1
+                if ita:
+                    RITIRATI_ITA.append({"id": p["id"], "nome": nome, "sport": "" if o == "(senza sport)" else o,
+                                         "ita": True})
+                continue           # ritirato: fuori da classifiche e stime
             if ita:
                 pass_vals[pas] = pass_vals.get(pas, 0) + 1
                 n_it += 1
@@ -746,6 +758,8 @@ def leggi_athletes(dbs, log):
             log(f"      note di lettura: {cs['stat']}")
         for r in cs["ita"] + cs["altri"]:
             log("      " + r)
+    log(f"Atleti ritirati (Honours = Retired) esclusi da classifiche e stime: {n_ritirati}"
+        + (f"; italiani: {', '.join(a['nome'] for a in RITIRATI_ITA)}" if RITIRATI_ITA else ""))
     log(f"Athletes: {len(out)} atleti letti, di cui italiani {sum(1 for x in out if x['ita'])}. "
         f"Valori di 'Pass LA28' tra gli italiani: {pass_vals}")
     return out
@@ -1253,6 +1267,8 @@ def stima_generica(atleti, escludi_ids, log):
 def costruisci(tutti, sims, wrest, log):
     athletes = [a for a in tutti if a["ita"]]
     rub = Rubrica(athletes)
+    rub_rit = Rubrica(RITIRATI_ITA)
+    scartati_rit = []
     righe, usati = [], set()
 
     def aggiungi(**k):
@@ -1276,6 +1292,11 @@ def costruisci(tutti, sims, wrest, log):
             if not is_italiano(r):
                 continue
             nome = r["nome"] or "(senza nome)"
+            if RITIRATI_ITA and not r["atleti"] and "/" not in nome and cfg.get("copertura") != "nazione":
+                rit = rub_rit.cerca(nome, sport)
+                if rit and not rub.cerca(nome, sport):
+                    scartati_rit.append(f"{sport}: {nome}")
+                    continue       # atleta ritirato ancora presente nella simulazione
             nomi_sim.setdefault(sport, []).append({x for x in toks_utili(r["atleti"] or nome) if len(x) >= 3})
             squadra = bool(r["atleti"]) or "/" in nome or "(ITA)" in nome.upper() or cfg.get("copertura") == "nazione"
             trovati = []
@@ -1367,6 +1388,8 @@ def costruisci(tutti, sims, wrest, log):
             aggiungi(sport=sp_sim or a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Dati insufficienti",
                      p=None, stato="Senza simulazione", nota=motivo,
                      fine=cfg["fine"].isoformat() if cfg else "")
+    if scartati_rit:
+        log(f"Righe di simulazione scartate perche' l'atleta e' ritirato: {', '.join(scartati_rit)}")
     log(f"Atleti di Athletes in sport simulati che non compaiono nella simulazione (scritti come Fuori): "
         f"{len(non_abbinati)}")
     for a in non_abbinati[:80]:
