@@ -2,7 +2,8 @@
 
 Cosa fa, ogni volta che parte:
  1. legge dal tuo Notion gli atleti italiani (db Athletes) e le simulazioni gia' prodotte dagli altri agenti
-    (LA 28 Judo, LA28 Taekwondo, Previsioni Wrestling LA28, LA28 Tennis, LA28 Canoe, LA28 Cycling);
+    (pagina "Agenti", colonna "LA28 Simulazioni": LA28 Beach Volley, LA28 Canoe, LA28 Cycling, LA 28 Judo,
+    LA28 Skateboarding, LA28 Squash, LA28 Taekwondo, LA28 Tennis);
  2. per ogni atleta o squadra calcola un livello (Certo / Probabile / Possibile / Remoto / Fuori) e una percentuale;
  3. scrive il risultato nel database Notion "Stima LA28" (solo le righe cambiate) e crea stima_la28.json per la pagina web.
 
@@ -10,8 +11,10 @@ Regole fisse:
  - se in Athletes la colonna "Pass LA28" vale Q, l'atleta e' CERTO (100%);
  - la colonna "Status LA28" di Athletes NON viene mai usata;
  - gli sport invernali sono esclusi;
- - judo, taekwondo, lotta, tennis, canoa e ciclismo usano le simulazioni gia' presenti in Notion;
- - tutte le altre discipline estive usano le regole del CIO (file regole_la28.py) applicate ai punteggi del db Athletes
+ - beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo e tennis usano le simulazioni gia' presenti
+   in Notion (elenco SIMS qui sotto);
+ - tutte le altre discipline estive (lotta compresa, finche' USA_MODELLO_WRESTLING e' False) usano le regole del CIO
+   (file regole_la28.py) applicate ai punteggi del db Athletes
    (classifica per prova di tutte le nazioni, limite per nazione, posti disponibili): stima approssimata, da affinare;
  - chi non ha punteggi o ranking utilizzabili compare come "Dati insufficienti".
 La percentuale e' una stima euristica (vedi METODO nel file e la pagina web), non un calcolo ufficiale.
@@ -50,31 +53,78 @@ VICINO = 2.0              # "vicino" = ranking entro 2 volte la soglia
 BASE_STATO = {"in attesa": 0.05}
 VIA_FISSA = [             # (parola nella via, probabilita') per chi e' dentro ma non per ranking diretto
     ("universal", 0.05), ("invito", 0.05), ("riassegn", 0.35), ("continent", 0.50),
-    ("grand slam", 0.60), ("champ", 0.60), ("ospitant", 0.90), ("paese", 0.90),
+    ("grand slam", 0.60), ("champ", 0.60), ("mondiali", 0.30), ("q-series", 0.20), ("torneo", 0.15),
+    ("ospitant", 0.90), ("paese", 0.90),
 ]
-IN_STATI = {"provvisorio", "qualificato"}
+IN_STATI = {"provvisorio", "qualificato", "garantito"}
+SCONTO_IPOTESI = 0.8      # stato "Ipotesi" (es. vincitore continentale o mondiale ipotizzato): via fissa x 0.8
+TORNEO = re.compile(r"q-?series|torneo|tournament|play-?off", re.I)   # vie decise in un torneo di qualificazione finale
+MAX_TORNEO = 0.60         # tetto per chi passa solo da un torneo con pochi posti
 SOGLIE = [(70, "Probabile"), (35, "Possibile"), (8, "Remoto"), (0, "Fuori")]
 LIVELLI = ["Certo", "Probabile", "Possibile", "Remoto", "Fuori", "Dati insufficienti"]
 COLORI = {"Certo": "green", "Probabile": "blue", "Possibile": "yellow", "Remoto": "orange", "Fuori": "gray",
           "Dati insufficienti": "default"}
 
-# (etichetta sport, titoli possibili del db, fine del periodo di qualificazione, copertura completa?)
+# Simulazioni della pagina Notion "⚙️ Agenti 🕵🏻‍♂️" (colonna "LA28 Simulazioni").
+#   label     etichetta sport scritta in "Stima LA28"
+#   db        ID del database in Notion (si cerca prima per ID, poi per titolo)
+#   titoli    titoli accettati se l'ID non e' visibile (maiuscole, spazi ed emoji non contano)
+#   fine      fine del periodo di qualificazione
+#   copertura "ind"     = la simulazione elenca tutti i candidati: chi non c'e' e' Fuori
+#             "nazione" = righe per nazione/equipaggio: gli atleti di Athletes non hanno una riga propria
+#             "parziale"= la simulazione non copre tutte le prove: chi non c'e' resta "Dati insufficienti"
+#   riga_unica True se in Athletes la squadra/coppia e' gia' una riga sola (beach volley: "Nome COGNOME/Nome COGNOME")
+#   alias     nomi dello sport usati nella colonna Sport di Athletes (minuscolo, solo lettere e numeri)
 SIMS = [
-    ("Judo", ["la 28 judo", "la28 judo"], date(2028, 6, 12), True),
-    ("Taekwondo", ["la28 taekwondo", "la 28 taekwondo"], date(2028, 5, 16), True),
-    ("Tennis", ["la28 tennis", "la 28 tennis"], date(2028, 6, 30), False),
-    ("Canoa", ["la28 canoe", "la 28 canoe"], date(2028, 6, 30), False),
-    ("Ciclismo", ["la28 cycling", "la 28 cycling"], date(2028, 6, 30), False),
+    dict(label="Beach Volleyball", db="7706c27fb15f4fd181db1c09a2bd0fe2",
+         titoli=["la28 beach volley", "la 28 beach volley", "la28 beachvolley"],
+         fine=RULES["Beach Volleyball"]["fine"], copertura="ind", riga_unica=True,
+         alias=["beachvolley", "beachvolleyball"]),
+    dict(label="Canoa", db="40ff48c9aad9800daa02fae8d9e3fc90", titoli=["la28 canoe", "la 28 canoe"],
+         fine=date(2028, 6, 30), copertura="nazione",
+         alias=["canoeslalom", "canoesprint", "canoe", "canoa", "canoeing"]),
+    dict(label="Ciclismo", db="40ff48c9aad980f692e2d4cf774035ab", titoli=["la28 cycling", "la 28 cycling"],
+         fine=date(2028, 6, 30), copertura="nazione",
+         alias=["cycling", "cyclingtrack", "cyclingroad", "cyclingmtb", "cyclingmountainbike", "cyclingbmxrace",
+                "cyclingbmxfreestyle", "bmxrace", "bmxfreestyle", "mountainbike", "road", "track"]),
+    dict(label="Judo", db="410f48c9aad98034bfbdd93791d8cd42", titoli=["la 28 judo", "la28 judo"],
+         fine=date(2028, 6, 12), copertura="ind", alias=["judo"]),
+    dict(label="Skateboarding", db="bddc45f0eb7647bd844979381048a695",
+         titoli=["la28 skateboarding", "la 28 skateboarding"],
+         fine=RULES["Skateboarding"]["fine"], copertura="ind", alias=["skateboarding", "skate"]),
+    dict(label="Squash", db="54ed8b9a26a44340bc228cc8a8d3e71b", titoli=["la28 squash", "la 28 squash"],
+         fine=RULES["Squash"]["fine"], copertura="ind", alias=["squash"]),
+    dict(label="Taekwondo", db="410f48c9aad980539764e6e3e5904db3", titoli=["la28 taekwondo", "la 28 taekwondo"],
+         fine=date(2028, 5, 16), copertura="ind", alias=["taekwondo"]),
+    dict(label="Tennis", db="40ff48c9aad980bcb44add4e19816b05", titoli=["la28 tennis", "la 28 tennis"],
+         fine=date(2028, 6, 30), copertura="parziale", alias=["tennis"]),
 ]
+SIM_PER_LABEL = {s["label"]: s for s in SIMS}
+
+# Lotta: il modello "Previsioni Wrestling LA28" non e' tra le simulazioni scelte, quindi per ora la lotta usa le
+# regole CIO + colonna UWW di Athletes. Per tornare al modello basta mettere True.
+USA_MODELLO_WRESTLING = False
 WRESTLING_TITLES = ["previsioni wrestling la28"]
 WRESTLING_END = date(2028, 6, 30)
+
+
+def _norm_sport(s):
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
 # sport di Athletes coperti da una simulazione -> etichetta sport usata nelle simulazioni
-SPORT_DI_ATHLETES = {
-    "Judo": "Judo", "Taekwondo": "Taekwondo", "Wrestling": "Wrestling", "Tennis": "Tennis",
-    "Canoe Slalom": "Canoa", "Canoe Sprint": "Canoa", "Cycling": "Ciclismo", "Cycling Track": "Ciclismo",
-    "Cycling Road": "Ciclismo", "Cycling MTB": "Ciclismo", "Cycling BMX Race": "Ciclismo",
-    "Cycling BMX Freestyle": "Ciclismo",
-}
+_SIM_ALIAS = {}
+for _s in SIMS:
+    _SIM_ALIAS[_norm_sport(_s["label"])] = _s["label"]
+    for _a in _s["alias"]:
+        _SIM_ALIAS[_a] = _s["label"]
+if USA_MODELLO_WRESTLING:
+    _SIM_ALIAS["wrestling"] = "Wrestling"
+
+
+def sim_di(sport_athletes):
+    """Nome dello sport in Athletes -> etichetta della simulazione che lo copre (None = si usano le regole CIO)."""
+    return _SIM_ALIAS.get(_norm_sport(sport_athletes))
 INVERNALI = {
     "Alpine Skiing", "Biathlon", "Bobsleigh", "Cross-Country Skiing", "Curling", "Figure Skating", "Freestyle Skiing",
     "Ice Hockey", "Luge", "Nordic Combined", "Ski Jumping", "Ski Mountaineering", "Skeleton", "Short Track",
@@ -283,10 +333,20 @@ def compatto(s):
     return re.sub(r"\s+", "", (s or "").lower().replace("\xa0", " "))
 
 
-def trova_db(dbs, titoli):
-    want = {compatto(t) for t in titoli}
+def _solo_alnum(s):
+    return "".join(c for c in (s or "").lower() if c.isascii() and c.isalnum())
+
+
+def trova_db(dbs, titoli, db_id=None):
+    """Database per ID (se indicato e visibile alla connessione), altrimenti per titolo (emoji e spazi ignorati)."""
+    if db_id:
+        want_id = db_id.replace("-", "").lower()
+        for d in dbs:
+            if d.get("id", "").replace("-", "").lower() == want_id:
+                return d
+    want = {_solo_alnum(t) for t in titoli}
     for d in dbs:
-        if compatto(plain(d.get("title"))) in want:
+        if _solo_alnum(plain(d.get("title"))) in want:
             return d
     return None
 
@@ -341,7 +401,15 @@ def chiave_nome(s):
 
 
 def parti_squadra(nome):
-    return [p.strip() for p in re.split(r"[/&,;]| e ", nome or "") if p.strip()]
+    """'Rossi / Bianchi, M.' -> ['Rossi', 'Bianchi, M.']: con la barra non si spezza sulla virgola (iniziale del nome)."""
+    sep = r"[/&;]| e " if "/" in (nome or "") else r"[/&,;]| e "
+    return [p.strip() for p in re.split(sep, nome or "") if p.strip()]
+
+
+def toks_utili(s):
+    """Parole del nome senza iniziali puntate ('Orsi Toth, R.' -> orsi, toth)."""
+    t = [x for x in toks(s) if len(x) > 1]
+    return set(t) if t else set(toks(s))
 
 
 class Rubrica:
@@ -354,24 +422,41 @@ class Rubrica:
             self.idx.setdefault(chiave_nome(a["nome"]), []).append(a)
 
     def cerca(self, nome, sport=None):
-        t = set(toks(nome))
+        t = toks_utili(nome)
         if not t:
             return None
-        hit = self.idx.get(" ".join(sorted(t)))
+        hit = self.idx.get(" ".join(sorted(t))) or self.idx.get(chiave_nome(nome))
         if hit:
             return self._scegli(hit, sport)
         cand = []
         for a in self.atleti:
-            u = set(toks(a["nome"]))
+            u = toks_utili(a["nome"])
             piccolo, grande = (t, u) if len(t) <= len(u) else (u, t)
             if len(piccolo) >= 2 and piccolo <= grande:
                 cand.append(a)
-        return self._scegli(cand, sport) if cand else None
+        if cand:
+            return self._scegli(cand, sport)
+        if not sport:
+            return None
+        # ultimo tentativo, solo tra gli atleti dello stesso sport: piu' parole in comune (es. cognomi della coppia
+        # 'Cottafava / Dal Corso' contro 'Samuele COTTAFAVA/Gianluca DEL CORSO'), oppure un cognome solo se e' unico
+        best, pari = None, False
+        for a in self.atleti:
+            if sim_di(a["sport"]) != sport and a["sport"] != sport:
+                continue
+            n = len(t & toks_utili(a["nome"]))
+            if best is None or n > best[0]:
+                best, pari = (n, a), False
+            elif n == best[0]:
+                pari = True
+        if best and not pari and (best[0] >= 2 or (len(t) == 1 and best[0] == 1)):
+            return best[1]
+        return None
 
     @staticmethod
     def _scegli(lst, sport):
         if sport:
-            sp = [a for a in lst if SPORT_DI_ATHLETES.get(a["sport"], a["sport"]) == sport]
+            sp = [a for a in lst if (sim_di(a["sport"]) or a["sport"]) == sport]
             if sp:
                 return sp[0]
         return lst[0]
@@ -532,7 +617,8 @@ def risolvi_ambigui(ambigui, valori, log):
 
 def leggi_athletes(dbs, log):
     """Legge Athletes a fette per sport (Notion non restituisce piu' di 10000 righe per interrogazione).
-    Per gli sport con regole legge tutte le nazioni; per gli altri solo gli italiani."""
+    Per gli sport stimati con le regole CIO legge tutte le nazioni (servono per la classifica); per gli sport coperti da
+    una simulazione e per quelli senza regole legge solo gli italiani."""
     d = trova_db(dbs, ["athletes"])
     if not d:
         die("non trovo il db 'Athletes' tra quelli condivisi con la connessione Notion.")
@@ -550,7 +636,7 @@ def leggi_athletes(dbs, log):
     for o in opzioni:
         if o in INVERNALI:
             continue
-        completo = sport_canonico(o) is not None
+        completo = sport_canonico(o) is not None and sim_di(o) is None
         flt = {"property": sport_k, "select": {"equals": o}}
         if not completo:
             flt = {"and": [flt, itf]}
@@ -585,7 +671,7 @@ def leggi_athletes(dbs, log):
                 pass_vals[pas] = pass_vals.get(pas, 0) + 1
                 n_it += 1
             ptsq = num(flat(pr[qk])) if qk else None
-            canon = sport_canonico(o)
+            canon = None if sim_di(o) else sport_canonico(o)   # sport con simulazione: niente regole CIO
             disc = flat(pr[dk]) if dk else ""
             pts = parse_punti(flat(pr[pdk]) if pdk else "")
             pt_txt, assegnati, amb_pending = {}, set(), None
@@ -675,6 +761,7 @@ def pulisci_sim_label(rows):
 
 def leggi_sim(db, sport, end, log):
     rows = []
+    qk = prop(db.get("properties", {}), "Q Athletes", tipo="checkbox")
     for p in query(db["id"]):
         pr = p["properties"]
         tk = titolo_di(pr)
@@ -683,10 +770,15 @@ def leggi_sim(db, sport, end, log):
              "stato": val(p, "Stato"), "via": val(p, "Via di qualificazione", "Via"), "dett": val(p, "Dettagli"),
              "atleti": val(p, "Atleti"), "evento": val(p, "Evento"), "disc": val(p, "Disciplina"),
              "genere": val(p, "Genere"), "cat": val(p, "Categoria"), "sim": val(p, "Simulazione"),
-             "nazione": val(p, "Nazione")}
+             "nazione": val(p, "Nazione"),
+             # beach volley: la simulazione riporta gia' se in Athletes la coppia ha Pass LA28 = Q
+             "q_ath": bool(qk and qk in pr and flat(pr[qk]) is True)}
         rows.append(r)
     rows, lab = pulisci_sim_label(rows)
-    log(f"{sport}: {len(rows)} righe di simulazione ({lab or 'senza etichetta'}).")
+    stati = {}
+    for r in rows:
+        stati[r["stato"] or "(vuoto)"] = stati.get(r["stato"] or "(vuoto)", 0) + 1
+    log(f"{sport}: {len(rows)} righe di simulazione ({lab or 'senza etichetta'}). Stati: {stati}")
     return rows
 
 
@@ -700,6 +792,10 @@ def etichetta_disciplina(r):
         return " ".join(x for x in (r["genere"], r["cat"]) if x)
     if r["sport"] == "Tennis":
         return r["evento"] or r["disc"]
+    if r["sport"] in ("Beach Volleyball", "Skateboarding"):
+        return r["evento"] or " ".join(x for x in (r["disc"], r["genere"]) if x)   # "Torneo maschile", "Park femminile"
+    if r["sport"] == "Squash":
+        return r["cat"] or " ".join(x for x in ("Singolare", r["genere"]) if x)    # "Singolare maschile"
     return " - ".join(x for x in (r["disc"], r["evento"], r["genere"]) if x)
 
 
@@ -752,10 +848,36 @@ def livello(p):
 
 def via_ranking(via):
     v = (via or "").lower()
+    # "Ranking WSR (posto ospitante riassegnato)", "Qualificazione diretta (posto ospitante riassegnato)":
+    # il posto del paese ospitante torna al ranking, quindi e' un posto da ranking a tutti gli effetti
+    if re.search(r"(ranking|diretta|diretto).*riassegnat", v):
+        return True
     if any(w in v for w in ("continent", "ospitant", "host", "universal", "grand slam", "champ", "invito",
-                            "riassegn", "riserva", "primi fuori")):
+                            "riassegn", "riserva", "primi fuori", "mondiali")) or TORNEO.search(v):
         return False
     return any(w in v for w in ("ranking", "diretta", "diretto", "oqr", "top ")) or v == ""
+
+
+def contesto_tornei(rows):
+    """Per ogni gruppo (prova/categoria): posti assegnati da un torneo di qualificazione finale (righe 'In attesa' con via
+    torneo/Q-Series) e forza complessiva dei candidati (somma di 1/ranking), per dividere i posti tra i candidati."""
+    ctx = {}
+    for r in rows:
+        if not TORNEO.search(r["via"] or ""):
+            continue
+        x = ctx.setdefault(gruppo(r), {"posti": 0, "n": 0, "forza": 0.0})
+        st = r["stato"].lower()
+        if st == "in attesa":
+            x["posti"] += 1
+        elif st == "candidato" and r["rank"]:
+            x["n"] += 1
+            x["forza"] += 1.0 / r["rank"]
+    return ctx
+
+
+def via_fissa(via, default=0.50):
+    v = (via or "").lower()
+    return next((pp for w, pp in VIA_FISSA if w in v), default)
 
 
 def soglie(rows):
@@ -768,9 +890,10 @@ def soglie(rows):
     return cut
 
 
-def stima_sim(r, cut):
+def stima_sim(r, cut, tornei=None):
     """Restituisce (probabilita' 0-100, margine, motivazione)."""
     st = r["stato"].lower()
+    via = (r["via"] or "").lower()
     end = r["end"]
     m = mesi_rimasti(end)
     c = cut.get(gruppo(r))
@@ -786,16 +909,43 @@ def stima_sim(r, cut):
             if p_rank is None:
                 return 60.0, None, "dentro nella simulazione, ma senza ranking utilizzabile per misurare il margine"
             p = min(0.97, max(0.05, p_rank))
+            if st in ("qualificato", "garantito"):
+                p = max(p, 0.90)
             return round(p * 100, 1), margine, (f"ranking {rank:g}, ultimo posto utile {c:g}: margine {margine:+g}; "
                                                 f"{m:.0f} mesi alla fine del periodo")
-        v = (r["via"] or "").lower()
-        p = next((pp for w, pp in VIA_FISSA if w in v), 0.50)
+        p = via_fissa(via)
+        if st in ("qualificato", "garantito"):
+            p = max(p, 0.90)
+            return round(p * 100, 1), margine, f"posto gia' assegnato nella simulazione ('{r['via']}'), in attesa del Pass"
         return round(p * 100, 1), margine, f"posto condizionato alla via '{r['via']}': stima prudenziale fissa"
-    if st == "riserva":
+    if st == "ipotesi":
+        p = via_fissa(via, 0.30) * SCONTO_IPOTESI
+        return round(p * 100, 1), margine, (f"posto ipotizzato dalla simulazione via '{r['via']}' "
+                                            "(evento non ancora disputato): stima prudenziale")
+    if st == "riserva" or (st == "candidato" and "riserv" in via):
         if p_rank is None:
-            return 12.0, margine, "prima riserva: entra solo se un posto resta libero"
+            return 12.0, margine, "riserva: entra solo se un posto resta libero"
         p = min(0.6, max(0.10, p_rank * 0.8))
-        return round(p * 100, 1), margine, f"riserva: ranking {rank:g}, soglia {c:g} (margine {margine:+g})"
+        return round(p * 100, 1), margine, (f"riserva: ranking {rank:g}, ultimo posto utile {c:g} (margine {margine:+g}); "
+                                            f"{m:.0f} mesi alla fine del periodo")
+    if st == "candidato" and TORNEO.search(via):
+        t = (tornei or {}).get(gruppo(r), {})
+        posti = t.get("posti") or 1
+        if rank and t.get("forza"):
+            p_t = posti * (1.0 / rank) / t["forza"]
+            dett = (f"candidato al torneo finale ('{r['via']}'): {posti} posti per {t['n']} candidati, "
+                    f"quota stimata in base al ranking {rank:g}")
+        else:
+            p_t = 0.05
+            dett = f"candidato al torneo finale ('{r['via']}'): posti e avversari non misurabili"
+        p_t = min(MAX_TORNEO, max(0.01, p_t))
+        p = 1 - (1 - (p_rank or 0.0)) * (1 - p_t)        # resta anche la strada del ranking diretto
+        if p_rank is not None:
+            dett += f"; per il ranking diretto serve risalire al posto {c:g} (margine {margine:+g})"
+        return round(min(0.9, p) * 100, 1), margine, dett
+    if st == "candidato":
+        p = max(0.03, (p_rank or 0.0) * 0.5)
+        return round(p * 100, 1), margine, f"candidato senza posto assegnato (via '{r['via']}')"
     if st == "fuori":
         if p_rank is None:
             return 2.0, margine, "fuori dai posti, senza ranking utile"
@@ -1116,34 +1266,48 @@ def costruisci(tutti, sims, wrest, log):
         k.setdefault("fine", "")
         righe.append(k)
 
-    # --- simulazioni a righe (judo, taekwondo, tennis, canoa, ciclismo)
+    # --- simulazioni a righe (beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis)
+    parole_sim = {}      # sport -> parole dei nomi italiani nella simulazione (per non dare "Fuori" a chi c'e' ma non e' abbinato)
     for sport, rows in sims.items():
+        cfg = SIM_PER_LABEL.get(sport, {})
         cut = soglie(rows)
+        tornei = contesto_tornei(rows)
         for r in rows:
             if not is_italiano(r):
                 continue
             nome = r["nome"] or "(senza nome)"
-            squadra = bool(r["atleti"]) or "/" in nome or "(ITA)" in nome.upper() or sport in ("Canoa", "Ciclismo")
-            nomi = parti_squadra(r["atleti"] or nome) if squadra else [nome]
-            trovati = [rub.cerca(n, sport) for n in nomi if "(ita)" not in n.lower()]
+            parole_sim.setdefault(sport, set()).update(x for x in toks_utili(r["atleti"] or nome) if len(x) >= 4)
+            squadra = bool(r["atleti"]) or "/" in nome or "(ITA)" in nome.upper() or cfg.get("copertura") == "nazione"
+            trovati = []
+            if squadra and cfg.get("riga_unica"):
+                # in Athletes la coppia e' una riga sola ("Valentina GOTTARDI/Reka ORSI TOTH")
+                nomi = [r["atleti"] or nome]
+                trovati = [rub.cerca(nomi[0], sport)]
+                if not trovati[0]:
+                    nomi = parti_squadra(r["atleti"] or nome)
+                    trovati = [rub.cerca(n, sport) for n in nomi]
+            else:
+                nomi = parti_squadra(r["atleti"] or nome) if squadra else [nome]
+                trovati = [rub.cerca(n, sport) for n in nomi if "(ita)" not in n.lower()]
             trovati = [t for t in trovati if t]
             for t in trovati:
                 usati.add(t["id"])
             certo = bool(trovati) and all(t["q"] for t in trovati) and (not squadra or len(trovati) == len(nomi))
+            certo = certo or r.get("q_ath", False)
             pas = "Q" if certo else ""
             if certo:
                 p, marg, nota = 100.0, None, "in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita"
                 liv = "Certo"
             else:
-                p, marg, nota = stima_sim(r, cut)
+                p, marg, nota = stima_sim(r, cut, tornei)
                 liv = livello(p)
             aggiungi(sport=sport, disciplina=etichetta_disciplina(r) or sport, nome=nome,
                      tipo="Squadra" if squadra else "Atleta", livello=liv, p=p, via=r["via"], rank=r["rank"],
                      margine=marg, stato=r["stato"], nota=(nota + ("; " + r["dett"] if r["dett"] else ""))[:1900],
                      pass_=pas, fine=r["end"].isoformat())
 
-    # --- wrestling (modello a simulazione di incontri, ha gia' la probabilita' di qualifica)
-    for w in wrest:
+    # --- wrestling (modello a simulazione di incontri): usato solo se USA_MODELLO_WRESTLING = True
+    for w in (wrest if USA_MODELLO_WRESTLING else []):
         a = rub.cerca(w["nome"], "Wrestling")
         if a:
             usati.add(a["id"])
@@ -1165,33 +1329,48 @@ def costruisci(tutti, sims, wrest, log):
     usati |= coperti_gen
 
     # --- atleti di Athletes non coperti da nessuna riga di simulazione
-    non_abbinati = []
+    non_abbinati, quasi = [], []
     for a in athletes:
         if a["id"] in usati or a["sport"] in INVERNALI:
             continue
-        sp_sim = SPORT_DI_ATHLETES.get(a["sport"])
+        sp_sim = sim_di(a["sport"])
+        cfg = SIM_PER_LABEL.get(sp_sim, {})
         disc = a["disc"].replace("|", ", ") if a["disc"] else a["sport"]
         if a["q"]:
-            aggiungi(sport=a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Certo", p=100.0,
+            aggiungi(sport=sp_sim or a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Certo", p=100.0,
                      stato="Pass LA28", nota="in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita",
                      pass_="Q")
         elif re.search(r"\bteam\b|\bmixed\b", a["nome"], re.I):
             continue      # voce di squadra (es. 'ITA Judo Mixed Team'), non un atleta
-        elif a["sport"] in ("Judo", "Taekwondo", "Wrestling"):
-            non_abbinati.append(a)
-            end = dict((s, e) for s, _, e, _ in SIMS).get(a["sport"], WRESTLING_END)
-            aggiungi(sport=a["sport"], disciplina=disc, nome=a["nome"], livello="Fuori", p=1.0, stato="Non in classifica",
-                     nota="non compare nella simulazione: fuori dalle posizioni utili del ranking olimpico",
-                     fine=end.isoformat())
-        elif sp_sim in ("Canoa", "Ciclismo"):
+        elif sp_sim and sp_sim not in sims and sp_sim != "Wrestling":
+            aggiungi(sport=sp_sim, disciplina=disc, nome=a["nome"], livello="Dati insufficienti", p=None,
+                     stato="Senza simulazione", fine=cfg["fine"].isoformat(),
+                     nota="il database di simulazione di questo sport non e' leggibile dalla connessione Notion")
+        elif cfg.get("copertura") == "nazione":
             continue      # la simulazione e' a livello di nazione/equipaggio: le righe di squadra coprono questi sport
+        elif sp_sim and {x for x in toks_utili(a["nome"]) if len(x) >= 4} & parole_sim.get(sp_sim, set()):
+            quasi.append(a)   # il cognome compare nella simulazione ma il nome non combacia: niente riga "Fuori" sbagliata
+        elif cfg.get("copertura") == "ind" or (sp_sim == "Wrestling" and USA_MODELLO_WRESTLING):
+            non_abbinati.append(a)
+            end = cfg["fine"] if cfg else WRESTLING_END
+            tipo = "Squadra" if cfg.get("riga_unica") and "/" in a["nome"] else "Atleta"
+            aggiungi(sport=sp_sim, disciplina=disc, nome=a["nome"], tipo=tipo, livello="Fuori", p=1.0,
+                     stato="Non in classifica", fine=end.isoformat(),
+                     nota=("la coppia non compare nella simulazione: fuori dalle posizioni utili" if tipo == "Squadra"
+                           else "non compare nella simulazione: fuori dalle posizioni utili del ranking olimpico"))
         else:
-            motivo = ("sport con simulazione a squadre/nazione: l'atleta non e' legato a una riga" if sp_sim
+            motivo = ("la simulazione non ha una riga per questo atleta" if sp_sim
                       else "sport senza regole di qualificazione nel file regole_la28.py")
-            aggiungi(sport=a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Dati insufficienti",
-                     p=None, stato="Senza simulazione", nota=motivo)
-    log(f"Atleti di Athletes non abbinati a una riga di simulazione ma in sport simulati (judo/tkd/wrestling): "
+            aggiungi(sport=sp_sim or a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Dati insufficienti",
+                     p=None, stato="Senza simulazione", nota=motivo,
+                     fine=cfg["fine"].isoformat() if cfg else "")
+    log(f"Atleti di Athletes in sport simulati che non compaiono nella simulazione (scritti come Fuori): "
         f"{len(non_abbinati)}")
+    if quasi:
+        log(f"ATTENZIONE: {len(quasi)} atleti hanno un cognome presente nella simulazione ma il nome non combacia "
+            f"(nessuna riga scritta per loro, controlla la grafia):")
+        for a in quasi[:40]:
+            log(f"   - {a['sport']}: {a['nome']}")
     for a in non_abbinati[:40]:
         log(f"   - {a['sport']}: {a['nome']}")
     # righe identiche (stesso sport, disciplina e nome): ne tengo una sola, quella con probabilita' piu' alta
@@ -1330,9 +1509,13 @@ def scrivi(righe):
 # --------------------------------------------------------------------------- json per la pagina web
 METODO = [
     "Il livello Certo vale solo se in Athletes la colonna Pass LA28 e' Q. La colonna Status LA28 non viene usata.",
-    "Judo, taekwondo, lotta, tennis, canoa e ciclismo partono dalle simulazioni gia' presenti in Notion (ranking olimpico "
-    "attuale): il margine e' la distanza in posti tra l'atleta o la nazione e l'ultimo posto utile della stessa categoria.",
-    "Tutte le altre discipline estive usano i regolamenti di qualificazione del CIO (posti per prova, limite per nazione, "
+    "Beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo e tennis partono dalle simulazioni gia' presenti "
+    "in Notion (ranking olimpico attuale): il margine e' la distanza in posti tra l'atleta, la coppia o la nazione e l'ultimo "
+    "posto utile della stessa categoria. Le riserve valgono in base alla distanza da quel posto; chi e' candidato a un torneo "
+    "finale (Q-Series del beach volley, torneo finale dello squash) riceve la sua quota dei posti del torneo in proporzione "
+    "al ranking, piu' la chance di rientrare dal ranking diretto; i posti ipotizzati (es. vincitore continentale non ancora "
+    "deciso) hanno una stima prudenziale fissa.",
+    "Tutte le altre discipline estive, lotta compresa, usano i regolamenti di qualificazione del CIO (posti per prova, limite per nazione, "
     "data di chiusura) applicati ai punteggi del db Athletes: per ogni prova si ordinano gli atleti di tutte le nazioni, "
     "si applica il limite per nazione e si guarda se l'atleta e' entro i posti assegnati dal ranking.",
     "Negli sport di squadra ogni nazione e' una riga-squadra in Athletes (es. 'ITA Men's Volley') e si usano i suoi punti; "
@@ -1390,26 +1573,30 @@ def main():
     log(f"Database visibili alla connessione: {len(dbs)}")
     athletes = leggi_athletes(dbs, log)
     sims = {}
-    for sport, titoli, end, _ in SIMS:
-        d = trova_db(dbs, titoli)
+    for s in SIMS:
+        d = trova_db(dbs, s["titoli"], s["db"])
         if not d:
-            msg = f"{sport}: database di simulazione non trovato (titoli cercati: {titoli}); sport trattato come 'dati insufficienti'."
+            msg = (f"{s['label']}: database di simulazione non trovato (ID {s['db']}, titoli {s['titoli']}): collega il db "
+                   "alla connessione Notion dell'agente; per ora lo sport e' trattato come 'dati insufficienti'.")
             log("ATTENZIONE: " + msg)
             note.append(msg)
             continue
-        sims[sport] = leggi_sim(d, sport, end, log)
+        sims[s["label"]] = leggi_sim(d, s["label"], s["fine"], log)
     wrest = []
-    dw = trova_db(dbs, WRESTLING_TITLES)
-    if dw:
-        wrest = leggi_wrestling(dw, log)
+    if USA_MODELLO_WRESTLING:
+        dw = trova_db(dbs, WRESTLING_TITLES)
+        if dw:
+            wrest = leggi_wrestling(dw, log)
+        else:
+            msg = "Wrestling: database 'Previsioni Wrestling LA28' non trovato."
+            log("ATTENZIONE: " + msg)
+            note.append(msg)
     else:
-        msg = "Wrestling: database 'Previsioni Wrestling LA28' non trovato."
-        log("ATTENZIONE: " + msg)
-        note.append(msg)
+        log("Wrestling: modello 'Previsioni Wrestling LA28' non usato (USA_MODELLO_WRESTLING = False): regole CIO + UWW.")
 
     senza_regole = {}
     for a in athletes:
-        if a["ita"] and not a["canon"] and a["sport"] not in INVERNALI and a["sport"] not in SPORT_DI_ATHLETES:
+        if a["ita"] and not a["canon"] and a["sport"] not in INVERNALI and not sim_di(a["sport"]):
             senza_regole[a["sport"] or "(senza sport)"] = senza_regole.get(a["sport"] or "(senza sport)", 0) + 1
     if senza_regole:
         log("Sport con atleti italiani ma SENZA regole di qualificazione (compaiono come 'Dati insufficienti'): "
