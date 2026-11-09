@@ -1267,7 +1267,7 @@ def costruisci(tutti, sims, wrest, log):
         righe.append(k)
 
     # --- simulazioni a righe (beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis)
-    parole_sim = {}      # sport -> parole dei nomi italiani nella simulazione (per non dare "Fuori" a chi c'e' ma non e' abbinato)
+    nomi_sim = {}        # sport -> parole di ogni nome italiano nella simulazione (per non dare "Fuori" a chi c'e' ma non e' abbinato)
     for sport, rows in sims.items():
         cfg = SIM_PER_LABEL.get(sport, {})
         cut = soglie(rows)
@@ -1276,7 +1276,7 @@ def costruisci(tutti, sims, wrest, log):
             if not is_italiano(r):
                 continue
             nome = r["nome"] or "(senza nome)"
-            parole_sim.setdefault(sport, set()).update(x for x in toks_utili(r["atleti"] or nome) if len(x) >= 4)
+            nomi_sim.setdefault(sport, []).append({x for x in toks_utili(r["atleti"] or nome) if len(x) >= 3})
             squadra = bool(r["atleti"]) or "/" in nome or "(ITA)" in nome.upper() or cfg.get("copertura") == "nazione"
             trovati = []
             if squadra and cfg.get("riga_unica"):
@@ -1348,8 +1348,11 @@ def costruisci(tutti, sims, wrest, log):
                      nota="il database di simulazione di questo sport non e' leggibile dalla connessione Notion")
         elif cfg.get("copertura") == "nazione":
             continue      # la simulazione e' a livello di nazione/equipaggio: le righe di squadra coprono questi sport
-        elif sp_sim and {x for x in toks_utili(a["nome"]) if len(x) >= 4} & parole_sim.get(sp_sim, set()):
-            quasi.append(a)   # il cognome compare nella simulazione ma il nome non combacia: niente riga "Fuori" sbagliata
+        elif sp_sim and any(len({x for x in toks_utili(a["nome"]) if len(x) >= 3} & ns) >= 2
+                            for ns in nomi_sim.get(sp_sim, [])):
+            # nome e cognome compaiono nella stessa riga della simulazione ma l'abbinamento non e' riuscito: meglio nessuna
+            # riga che un "Fuori" sbagliato (un solo cognome in comune, es. fratelli o omonimi, non basta)
+            quasi.append(a)
         elif cfg.get("copertura") == "ind" or (sp_sim == "Wrestling" and USA_MODELLO_WRESTLING):
             non_abbinati.append(a)
             end = cfg["fine"] if cfg else WRESTLING_END
@@ -1366,13 +1369,13 @@ def costruisci(tutti, sims, wrest, log):
                      fine=cfg["fine"].isoformat() if cfg else "")
     log(f"Atleti di Athletes in sport simulati che non compaiono nella simulazione (scritti come Fuori): "
         f"{len(non_abbinati)}")
+    for a in non_abbinati[:80]:
+        log(f"   - {a['sport']}: {a['nome']}")
     if quasi:
-        log(f"ATTENZIONE: {len(quasi)} atleti hanno un cognome presente nella simulazione ma il nome non combacia "
-            f"(nessuna riga scritta per loro, controlla la grafia):")
+        log(f"ATTENZIONE: {len(quasi)} atleti hanno nome e cognome in una riga della simulazione ma l'abbinamento non e' "
+            f"riuscito (nessuna riga scritta per loro, controlla la grafia):")
         for a in quasi[:40]:
             log(f"   - {a['sport']}: {a['nome']}")
-    for a in non_abbinati[:40]:
-        log(f"   - {a['sport']}: {a['nome']}")
     # righe identiche (stesso sport, disciplina e nome): ne tengo una sola, quella con probabilita' piu' alta
     migliori = {}
     for r in righe:
