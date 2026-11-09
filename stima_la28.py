@@ -21,6 +21,7 @@ La percentuale e' una stima euristica (vedi METODO nel file e la pagina web), no
 
 Variabili: NOTION_TOKEN, NOTION_DATABASE_ID (il db "Stima LA28"), DRY_RUN (true = non scrive su Notion).
 """
+import difflib
 import hashlib
 import json
 import math
@@ -80,13 +81,13 @@ SIMS = [
          titoli=["la28 beach volley", "la 28 beach volley", "la28 beachvolley"],
          fine=RULES["Beach Volleyball"]["fine"], copertura="ind", riga_unica=True,
          alias=["beachvolley", "beachvolleyball"]),
-    dict(label="Canoa", db="40ff48c9aad9800daa02fae8d9e3fc90", titoli=["la28 canoe", "la 28 canoe"],
+    dict(label="Canoeing", db="40ff48c9aad9800daa02fae8d9e3fc90", titoli=["la28 canoe", "la 28 canoe"],
          fine=date(2028, 6, 30), copertura="nazione",
          alias=["canoeslalom", "canoesprint", "canoe", "canoa", "canoeing"]),
-    dict(label="Ciclismo", db="40ff48c9aad980f692e2d4cf774035ab", titoli=["la28 cycling", "la 28 cycling"],
+    dict(label="Cycling", db="40ff48c9aad980f692e2d4cf774035ab", titoli=["la28 cycling", "la 28 cycling"],
          fine=date(2028, 6, 30), copertura="nazione",
          alias=["cycling", "cyclingtrack", "cyclingroad", "cyclingmtb", "cyclingmountainbike", "cyclingbmxrace",
-                "cyclingbmxfreestyle", "bmxrace", "bmxfreestyle", "mountainbike", "road", "track"]),
+                "cyclingbmxfreestyle", "cyclingbmxracing", "bmxrace", "bmxracing", "bmxfreestyle", "mountainbike", "road", "track"]),
     dict(label="Judo", db="410f48c9aad98034bfbdd93791d8cd42", titoli=["la 28 judo", "la28 judo"],
          fine=date(2028, 6, 12), copertura="ind", alias=["judo"]),
     dict(label="Skateboarding", db="bddc45f0eb7647bd844979381048a695",
@@ -844,6 +845,172 @@ def leggi_wrestling(db, log):
     return out
 
 
+
+# --------------------------------------------------------------------------- prove del programma senza italiani
+# Programma olimpico LA28: database "HOME OF THE OLYMPIC GAMES 🌏" (righe con Tipo = "Olympic Sport Program", estive).
+# Per ogni prova del programma in cui in Athletes (e nelle simulazioni) non c'e' nessun atleta o squadra italiana,
+# l'agente scrive comunque una riga "Fuori", cosi' la pagina mostra tutto il programma.
+PROGRAMMA_DB = "2c5f48c9aad980b690d5e1aa2ce386b4"
+PROGRAMMA_TITOLI = ["home of the olympic games"]
+PROGRAMMA_TIPO = "Olympic Sport Program"
+
+_PAROLE_GENERE = {"men", "mens", "man", "women", "womens", "woman", "mixed", "mix", "misto", "mista", "uomini", "donne",
+                  "maschile", "femminile", "maschili", "femminili", "ladies", "male", "female"}
+_STOP = {"m", "s", "kg", "event", "throw", "the", "and", "di", "a", "e", "del", "della", "tae", "iwf", "box"}
+_TRAD = {"inseguimento": "pursuit", "squadre": "team", "squadra": "team", "velocita": "sprint", "strada": "road",
+         "cronometro": "trial", "crono": "trial", "singolare": "singles", "doppio": "doubles", "staffetta": "relay",
+         "medley": "med", "im": "med", "individuale": "individual", "freestyle": "fs", "synchro": "synch",
+         "sync": "synch", "plaftorm": "platform", "parallels": "parallel", "buttefly": "butterfly", "racing": "race",
+         "hurdles": "hs", "volley": "", "beach": ""}
+# parole che indicano solo lo sport (vanno tolte per confrontare le prove)
+_PAROLE_SPORT = {
+    "Basketball": {"basketball", "x"}, "Volleyball": {"volleyball"}, "Handball": {"handball"},
+    "Hockey": {"hockey", "field"}, "Rugby Sevens": {"rugby", "sevens"}, "Football": {"football", "soccer"},
+    "Flag Football": {"flag", "football"}, "Lacrosse": {"lacrosse", "sixes"}, "Cricket": {"cricket", "t"},
+    "Water Polo": {"water", "polo"}, "Baseball": {"baseball"}, "Softball": {"softball"}, "Golf": {"golf"},
+    "Squash": {"squash", "singles"}, "Surfing": {"surfing", "shortboard"}, "Triathlon": {"triathlon"},
+    "Trampoline": {"trampoline"}, "Modern Pentathlon": {"modern", "pentathlon"},
+    "Open Water Swimming": {"open", "water", "km", "10", "marathon", "swimming"}, "Judo": {"judo"},
+    "Canoeing": {"canoa", "canoe", "canoeing", "slalom", "sprint"}, "Cycling": {"pista", "track", "ciclismo", "cycling"},
+    "Beach Volleyball": {"torneo", "volleyball"}, "Skateboarding": {"skateboarding"},
+}
+_EXTRA_SPORT = {"cyclingbmxracing": {"bmx"}, "cyclingbmxrace": {"bmx"}, "cyclingbmxfreestyle": {"bmx"}}
+TIPO_SQUADRA = re.compile(r"team|relay|4x|doubles|duet|synch|sync|pair|double|four|eight|quad|madison|group|"
+                          r"\b[kc][24]\b|\b470\b|nacra|49er|sculls \([mwx]?[24]|squadr", re.I)
+
+
+def famiglia_sport(nome):
+    """Nome dello sport (Athletes o programma) -> etichetta usata nella stima (simulazione o regole CIO)."""
+    sim = sim_di(nome)
+    if sim:
+        return sim
+    canon = sport_canonico(nome)
+    if canon == "3x3 Basketball":
+        return "Basketball"
+    return canon
+
+
+def genere_prova(testo):
+    t = senza_emoji(testo).lower()
+    if re.search(r"\bwom[ae]n|\bfemmin|\bdonne|\bladies", t):
+        return "W"
+    if re.search(r"\bm[ae]n\b|\bmens\b|\bmaschil|\buomini", t):
+        return "M"
+    if re.search(r"mixed|\bmist[oa]\b|\bmix", t):
+        return "X"
+    return ""
+
+
+def parole_prova(testo, fam, extra=()):
+    """Testo della prova -> (numeri, parole): '+100kg' e '-100kg' restano diversi, '3x3' resta un'unica parola."""
+    t = senza_emoji(testo).lower().replace("+", " piu ").replace("3x3", " tretre ").replace("'", " ")
+    t = re.sub(r"(\d)([a-z])", r"\1 \2", t)
+    t = re.sub(r"([a-z])(\d)", r"\1 \2", t)
+    togli = _PAROLE_SPORT.get(fam, set())
+    out = set(extra)
+    for w in re.findall(r"[a-z]+|\d+", t):
+        w = _TRAD.get(w, w)
+        if not w or w in _STOP or w in _PAROLE_GENERE or w in togli:
+            continue
+        out.add(w)
+    num = {w for w in out if w.isdigit() or w == "piu"}
+    return frozenset(num), frozenset(out - num)
+
+
+def stessa_prova(a, b):
+    """a, b = (genere, numeri, parole). Genere uguale (o non indicato), stessi numeri, parole compatibili."""
+    ga, na, pa = a
+    gb, nb, pb = b
+    if ga and gb and ga != gb:
+        return False
+    if na != nb:
+        return False
+    if pa <= pb or pb <= pa:
+        return True
+    sa, sb = "".join(sorted(pa)), "".join(sorted(pb))
+    return sa in sb or sb in sa or difflib.SequenceMatcher(None, sa, sb).ratio() >= 0.85
+
+
+def leggi_programma(dbs, log):
+    d = trova_db(dbs, PROGRAMMA_TITOLI, PROGRAMMA_DB)
+    if not d:
+        log("ATTENZIONE: non trovo il db del programma olimpico ('HOME OF THE OLYMPIC GAMES'): le prove senza italiani "
+            "non vengono aggiunte. Collega il db alla connessione Notion dell'agente.")
+        return None
+    pr0 = d["properties"]
+    tk = prop(pr0, "Tipo", tipo="select")
+    sk = prop(pr0, "Season", "Stagione", tipo="select")
+    spk = prop(pr0, "Sport", tipo="select")
+    dk = prop(pr0, "Disciplina", tipo="select")
+    if not (tk and spk and dk):
+        log(f"ATTENZIONE: nel db del programma non trovo le colonne Tipo/Sport/Disciplina: {list(pr0)[:30]}")
+        return None
+    out = []
+    for p in query(d["id"], {"property": tk, "select": {"equals": PROGRAMMA_TIPO}}):
+        pr = p["properties"]
+        if sk and "winter" in str(flat(pr[sk])).lower():
+            continue
+        sp, di = flat(pr[spk]).strip(), flat(pr[dk]).strip()
+        if sp and di and sp not in INVERNALI:
+            out.append((sp, di))
+    log(f"Programma LA28: {len(out)} prove estive lette dal db '{plain(d.get('title'))}'.")
+    return out
+
+
+def prove_senza_italiani(programma, atleti, sims, righe_stima, log):
+    """Righe 'Fuori' per le prove del programma in cui non c'e' nessun italiano (ne' in Athletes ne' nelle simulazioni)."""
+    presenti = {}      # famiglia -> [(genere, numeri, parole)]
+    for a in atleti:
+        if not a["ita"]:
+            continue
+        fam = famiglia_sport(a["sport"])
+        if not fam:
+            continue
+        for ev in (a["disc"] or "").split("|"):
+            if ev and not ev.startswith("\U0001F534"):
+                presenti.setdefault(fam, []).append((genere_prova(ev),) + parole_prova(ev, fam))
+    for sport, rows in sims.items():
+        for r in rows:
+            if is_italiano(r):
+                testo = " ".join(x for x in (r["evento"], r["disc"], r["cat"]) if x)
+                g = genere_prova(" ".join((r["genere"], r["evento"], r["cat"])))
+                presenti.setdefault(sport, []).append((g,) + parole_prova(testo, sport))
+    for r in righe_stima:          # prove che hanno gia' una riga nella stima (anche se la Disciplina di Athletes e' diversa)
+        presenti.setdefault(r["sport"], []).append((genere_prova(r["disciplina"] + " " + r["nome"]),)
+                                                   + parole_prova(r["disciplina"], r["sport"]))
+    righe, viste, senza_fam = [], set(), set()
+    for sp, di in programma:
+        fam = famiglia_sport(sp)
+        if not fam:
+            senza_fam.add(sp)
+            continue
+        extra = _EXTRA_SPORT.get(_norm_sport(sp), ())
+        prova = (genere_prova(di),) + parole_prova(di, fam, extra)
+        if (fam,) + prova in viste:
+            continue
+        viste.add((fam,) + prova)
+        if any(stessa_prova(prova, x) for x in presenti.get(fam, [])):
+            continue
+        g = prova[0]
+        disc = re.sub(r"^[^A-Za-z0-9+\-]+", "", di).strip()
+        squadra = (RULES.get(fam, {}).get("kind") in ("team", "pair") or fam == "Beach Volleyball"
+                   or bool(TIPO_SQUADRA.search(disc)))
+        nome = ("Italia" + (f" ({IT_GENERE[g]})" if g else "")) if squadra else "Nessun atleta italiano"
+        fine = (SIM_PER_LABEL[fam]["fine"] if fam in SIM_PER_LABEL else
+                RULES[fam]["fine"] if fam in RULES else None)
+        righe.append(dict(sport=fam, disciplina=disc[:100], nome=nome, tipo="Squadra" if squadra else "Atleta",
+                          livello="Fuori", p=1.0, via="", rank=None, margine=None, stato="Nessun italiano",
+                          pass_="", fine=fine.isoformat() if fine else "",
+                          nota=("prova in programma a LA28 ma in Athletes non c'e' nessun atleta o squadra italiana "
+                                "(e nessuna riga nelle simulazioni): oggi l'Italia non risulta in corsa. Se ci sono "
+                                "italiani in questa prova, aggiungili ad Athletes con la disciplina corretta.")))
+    log(f"\nProve del programma LA28 senza nessun italiano in Athletes o nelle simulazioni: {len(righe)}")
+    for r in righe:
+        log(f"   - {r['sport']}: {r['disciplina']}")
+    if senza_fam:
+        log(f"   (sport del programma non riconosciuti, saltati: {', '.join(sorted(senza_fam))})")
+    return righe
+
 # --------------------------------------------------------------------------- stima
 def mesi_rimasti(end):
     return max(0.0, (end - OGGI).days / 30.4)
@@ -1358,7 +1525,7 @@ def costruisci(tutti, sims, wrest, log):
         cfg = SIM_PER_LABEL.get(sp_sim, {})
         disc = a["disc"].replace("|", ", ") if a["disc"] else a["sport"]
         if a["q"]:
-            aggiungi(sport=sp_sim or a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Certo", p=100.0,
+            aggiungi(sport=sp_sim or a["sport"] or "Other", disciplina=disc, nome=a["nome"], livello="Certo", p=100.0,
                      stato="Pass LA28", nota="in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita",
                      pass_="Q")
         elif re.search(r"\bteam\b|\bmixed\b", a["nome"], re.I):
@@ -1385,7 +1552,7 @@ def costruisci(tutti, sims, wrest, log):
         else:
             motivo = ("la simulazione non ha una riga per questo atleta" if sp_sim
                       else "sport senza regole di qualificazione nel file regole_la28.py")
-            aggiungi(sport=sp_sim or a["sport"] or "Altro", disciplina=disc, nome=a["nome"], livello="Dati insufficienti",
+            aggiungi(sport=sp_sim or a["sport"] or "Other", disciplina=disc, nome=a["nome"], livello="Dati insufficienti",
                      p=None, stato="Senza simulazione", nota=motivo,
                      fine=cfg["fine"].isoformat() if cfg else "")
     if scartati_rit:
@@ -1558,9 +1725,16 @@ METODO = [
     "tennis tavolo, vela, arrampicata, arco individuale, triathlon, golf), FEN (scherma), WB (pugilato), UWW (lotta), KG (pesi), "
     "SCORE (tuffi, nuoto artistico), PFM (nuoto e atletica: tempo piu' basso = meglio per nuoto, corsa, marcia; misura piu' alta = "
     "meglio per salti, lanci e prove multiple).",
+    "Sono elencate anche le prove del programma LA28 in cui in Athletes non c'e' nessun atleta o squadra italiana: "
+    "compaiono come 'Fuori' con la nota 'Nessun italiano'.",
     "Atletica: quote e standard sono provvisori fino a dicembre 2026. E' una stima euristica per orientarsi, non un calcolo "
     "ufficiale: i regolamenti completi sono sul sito del CIO.",
 ]
+
+
+def chiave_alfabetica(t):
+    t = unicodedata.normalize("NFKD", t or "")
+    return "".join(c for c in t if not unicodedata.combining(c)).casefold()
 
 
 def scrivi_json(righe, note):
@@ -1571,7 +1745,7 @@ def scrivi_json(righe, note):
         s = sport.setdefault(r["sport"], {"nome": r["sport"], "n": 0, **{n: 0 for n in LIVELLI}})
         s["n"] += 1
         s[r["livello"]] += 1
-    elenco = sorted(sport.values(), key=lambda s: (-(s["Certo"] + s["Probabile"]), -s["n"], s["nome"]))
+    elenco = sorted(sport.values(), key=lambda s: chiave_alfabetica(s["nome"]))      # ordine alfabetico
     out = {
         "aggiornato": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "totali": conteggi, "sport": elenco, "metodo": METODO, "note": note,
@@ -1628,8 +1802,13 @@ def main():
         log("Sport con atleti italiani ma SENZA regole di qualificazione (compaiono come 'Dati insufficienti'): "
             + ", ".join(f"{k} ({v})" for k, v in sorted(senza_regole.items())))
     righe = costruisci(athletes, sims, wrest, log)
+    programma = leggi_programma(dbs, log)
+    if programma is None:
+        note.append("Programma LA28 non leggibile: le prove senza italiani non sono elencate.")
+    else:
+        righe += prove_senza_italiani(programma, athletes, sims, righe, log)
     ordine = {n: i for i, n in enumerate(LIVELLI)}
-    righe.sort(key=lambda r: (r["sport"], ordine[r["livello"]], -(r["p"] or 0), r["nome"]))
+    righe.sort(key=lambda r: (chiave_alfabetica(r["sport"]), ordine[r["livello"]], -(r["p"] or 0), r["nome"]))
     log("\n=== Riepilogo per sport e livello ===")
     tab = {}
     for r in righe:
