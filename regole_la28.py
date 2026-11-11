@@ -248,8 +248,8 @@ QUOTE_RIEPILOGO = {
             dict(nome="pista endurance", prove=r"pista|track|inseguimento|pursuit|omnium|madison|americana",
                  famiglia="pista", posti=[(r"inseguimento|pursuit", 4), (r"madison|americana", 2)]),
         ],
-        nota="[DA VERIFICARE] Cycling: le righe della simulazione sono per nazione, senza nomi: sprint/keirin, MTB e "
-             "BMX valgono 1 atleta per riga; la strada non ha righe nella Stima."),
+        nota="[DA VERIFICARE] Cycling: il ciclismo su strada non ha righe nella Stima (la simulazione UCI non lo copre: "
+             "manca l'UCI Road World Ranking by nations su cui si basa la qualificazione)."),
     "Diving": dict(
         tetto={"U": 8, "D": 8},
         pool=[dict(nome="tuffi", prove=None, posti=[(r"synch|sincro", 2)])]),
