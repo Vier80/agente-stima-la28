@@ -77,6 +77,8 @@ COLORI = {"Certo": "green", "Probabile": "blue", "Possibile": "yellow", "Remoto"
 #             "nazione" = righe per nazione/equipaggio: gli atleti di Athletes non hanno una riga propria
 #             "parziale"= la simulazione non copre tutte le prove: chi non c'e' resta "Dati insufficienti"
 #   riga_unica True se in Athletes la squadra/coppia e' gia' una riga sola (beach volley: "Nome COGNOME/Nome COGNOME")
+#   nominativi True se la simulazione e' per nazione ma la colonna Atleti ha i nomi (ciclismo): nelle prove
+#             individuali si scrive una riga per atleta, nelle prove a squadre una riga "Italia (uomini/donne)"
 #   alias     nomi dello sport usati nella colonna Sport di Athletes (minuscolo, solo lettere e numeri)
 SIMS = [
     dict(label="Beach Volleyball", db="7706c27fb15f4fd181db1c09a2bd0fe2",
@@ -87,7 +89,7 @@ SIMS = [
          fine=date(2028, 6, 30), copertura="nazione",
          alias=["canoeslalom", "canoesprint", "canoe", "canoa", "canoeing"]),
     dict(label="Cycling", db="40ff48c9aad980f692e2d4cf774035ab", titoli=["la28 cycling", "la 28 cycling"],
-         fine=date(2028, 6, 30), copertura="nazione",
+         fine=date(2028, 6, 30), copertura="nazione", nominativi=True,
          alias=["cycling", "cyclingtrack", "cyclingroad", "cyclingmtb", "cyclingmountainbike", "cyclingbmxrace",
                 "cyclingbmxfreestyle", "cyclingbmxracing", "bmxrace", "bmxracing", "bmxfreestyle", "mountainbike", "road", "track"]),
     dict(label="Judo", db="410f48c9aad98034bfbdd93791d8cd42", titoli=["la 28 judo", "la28 judo"],
@@ -818,6 +820,40 @@ def etichetta_disciplina(r):
     return " - ".join(x for x in (r["disc"], r["evento"], r["genere"]) if x)
 
 
+def nome_proprio(n):
+    """'CINGOLANI FERREIRA Francesca' (COGNOME Nome, come scrive l'UCI) -> 'Francesca CINGOLANI FERREIRA'
+    (Nome COGNOME, come in Athletes). Se non si riconosce il cognome in maiuscolo, il nome resta com'e'."""
+    parole = n.split()
+    k = 0
+    while k < len(parole) and parole[k].isupper():
+        k += 1
+    if k == 0 or k == len(parole):
+        return " ".join(parole)
+    return " ".join(parole[k:] + parole[:k])
+
+
+def atleti_sim(testo):
+    """Colonna Atleti della simulazione del ciclismo -> (atleti, candidati, posti senza nome).
+    'BERTA Martina (1998); CORVI Valentina (1323)'  -> (['Martina BERTA', 'Valentina CORVI'], [], 0)
+    'Candidati: LAMON Francesco (450); ...'         -> ([], ['Francesco LAMON', ...], 0)   (prove a squadre)
+    'PASA Federico (382) + 1 da definire'          -> (['Federico PASA'], [], 1)"""
+    t = (testo or "").strip()
+    senza_nome = 0
+    m = re.search(r"\+\s*(\d+)\s*da definire", t)
+    if m:
+        senza_nome = int(m.group(1))
+        t = t[:m.start()]
+    candidati = t.lower().startswith("candidati")
+    if candidati:
+        t = t.split(":", 1)[1] if ":" in t else ""
+    nomi = []
+    for parte in t.split(";"):
+        n = re.sub(r"\(.*?\)", " ", parte).strip()      # toglie i punti "(1998)" e il ranking "(n.21)"
+        if n:
+            nomi.append(nome_proprio(n))
+    return ([], nomi, senza_nome) if candidati else (nomi, [], senza_nome)
+
+
 def is_italiano(r):
     return "ITA" in (r["noc"] or "").upper() or "(ITA)" in (r["nome"] or "").upper() or \
         "ITALY" in (r["nazione"] or "").upper() or "ITALIA" in (r["nome"] or "").upper()
@@ -1522,9 +1558,45 @@ def costruisci(tutti, sims, wrest, log):
             else:
                 p, marg, nota = stima_sim(r, cut, tornei)
                 liv = livello(p)
+            dettaglio = nota + ("; " + r["dett"] if r["dett"] else "")
+            if cfg.get("nominativi") and squadra:
+                # ciclismo: la simulazione e' per nazione, ma nella colonna Atleti ha i nomi degli atleti che hanno
+                # portato i punti UCI. Prove individuali: una riga per atleta, come negli altri sport.
+                # Prove a squadre ("Candidati: ..."): una riga "Italia (uomini/donne)", come staffette e scherma.
+                genere = (r["genere"] or "").lower()
+                nome_squadra = "Italia" + (f" ({genere})" if genere else "")
+                base = dict(sport=sport, disciplina=etichetta_disciplina(r) or sport, via=r["via"], rank=r["rank"],
+                            margine=marg, stato=r["stato"], fine=r["end"].isoformat())
+                atleti, candidati, senza_nome = atleti_sim(r["atleti"])
+                if candidati or not atleti:
+                    extra = ("; candidati (i punti UCI sono della nazione, formazione non determinabile): "
+                             + ", ".join(candidati)) if candidati else ""
+                    aggiungi(nome=nome_squadra, tipo="Squadra", livello=liv, p=p, pass_=pas,
+                             nota=(dettaglio + extra)[:1900], **base)
+                    continue
+                for a in atleti:
+                    t = rub.cerca(a, sport)
+                    if RITIRATI_ITA and not t and rub_rit.cerca(a, sport):
+                        scartati_rit.append(f"{sport}: {a}")
+                        continue       # atleta ritirato ancora presente nella simulazione
+                    if t:
+                        usati.add(t["id"])
+                    if t and t["q"]:
+                        aggiungi(nome=a, tipo="Atleta", livello="Certo", p=100.0, pass_="Q",
+                                 nota=("in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita"
+                                       + ("; " + r["dett"] if r["dett"] else ""))[:1900], **base)
+                    else:
+                        aggiungi(nome=a, tipo="Atleta", livello=liv, p=p, pass_=pas, nota=dettaglio[:1900], **base)
+                if senza_nome:
+                    # posti della nazione per cui la simulazione non ha un nome: una riga di squadra con quei posti
+                    # ("posti" serve solo al riepilogo delle quote: non va in Notion ne' nel json)
+                    aggiungi(nome=nome_squadra, tipo="Squadra", livello=liv, p=p, pass_="", posti=senza_nome,
+                             nota=(f"{senza_nome} posti della nazione senza un atleta con punti UCI; "
+                                   + dettaglio)[:1900], **base)
+                continue
             aggiungi(sport=sport, disciplina=etichetta_disciplina(r) or sport, nome=nome,
                      tipo="Squadra" if squadra else "Atleta", livello=liv, p=p, via=r["via"], rank=r["rank"],
-                     margine=marg, stato=r["stato"], nota=(nota + ("; " + r["dett"] if r["dett"] else ""))[:1900],
+                     margine=marg, stato=r["stato"], nota=dettaglio[:1900],
                      pass_=pas, fine=r["end"].isoformat())
 
     # --- wrestling (modello a simulazione di incontri): usato solo se USA_MODELLO_WRESTLING = True
@@ -1855,7 +1927,7 @@ def quote_sport(nome, righe_sport, avvisi):
         if rosa and "tetto" not in cfg:
             cfg["tetto"] = rosa
     persone = Persone()
-    grezze = []                             # (riga, livello 0-3, pool, genere, [id persone], posti senza nomi, squadra)
+    grezze = []      # (livello 0-3, pool, genere, [id persone], posti senza nomi, squadra, posti in piu')
     for r in righe_sport:
         k = LIVELLI_QUOTE.index(r["livello"])
         ip = _pool_di(cfg, r["disciplina"])
@@ -1866,17 +1938,19 @@ def quote_sport(nome, righe_sport, avvisi):
                           f"({r['nome']}): contato in Misto")
             g = "X"
         ids = [persone.trova(t) for t in persone_riga(r["nome"])]
-        posti = 0 if ids else posti_riga(pool, cfg, r["disciplina"])
+        posti = 0 if ids else (r.get("posti") or posti_riga(pool, cfg, r["disciplina"]))
         squadra = bool(pool.get("squadra") and re.search(pool["squadra"], r["disciplina"], re.I))
+        # "posti" nella riga = posti della nazione senza un nome (ciclismo): si aggiungono agli atleti con nome
+        in_piu = bool(r.get("posti")) and not ids
         if g in ("U", "D"):
             for i in ids:
                 persone.genere[i] = persone.genere[i] or g      # il genere della persona serve alle prove miste
-        grezze.append((k, ip, g, ids, posti, squadra))
+        grezze.append((k, ip, g, ids, posti, squadra, in_piu))
     # le prove miste si dividono: meta' uomini, meta' donne (con un numero dispari, uno in piu' alle donne)
-    voci = []                               # (livello, pool, genere, [id], posti senza nomi, squadra)
-    for k, ip, g, ids, posti, squadra in grezze:
+    voci = []                               # (livello, pool, genere, [id], posti senza nomi, squadra, posti in piu')
+    for k, ip, g, ids, posti, squadra, in_piu in grezze:
         if g != MISTA:
-            voci.append((k, ip, g, ids, posti, squadra))
+            voci.append((k, ip, g, ids, posti, squadra, in_piu))
             continue
         n = len(ids) or posti
         resto = {"U": n // 2, "D": n - n // 2}
@@ -1895,12 +1969,12 @@ def quote_sport(nome, righe_sport, avvisi):
             persone.genere[i] = persone.genere[i] or gi
         for gi in ("U", "D"):
             if ids and per_genere[gi]:
-                voci.append((k, ip, gi, per_genere[gi], 0, False))
+                voci.append((k, ip, gi, per_genere[gi], 0, False, False))
             elif not ids and resto[gi] > 0:
-                voci.append((k, ip, gi, [], resto[gi], False))
+                voci.append((k, ip, gi, [], resto[gi], False, in_piu))
     # livello migliore di ogni persona (e il pool e il genere in cui lo raggiunge): una persona conta una volta sola
     migliore = {}
-    for k, ip, g, ids, _p, _s in voci:
+    for k, ip, g, ids, _p, _s, _i in voci:
         for i in ids:
             if i not in migliore or k < migliore[i][0]:
                 migliore[i] = (k, ip, g)
@@ -1914,11 +1988,12 @@ def quote_sport(nome, righe_sport, avvisi):
             scalini = []
             for k in range(len(LIVELLI_QUOTE)):
                 nominati = sum(1 for (kk, pp, gg) in migliore.values() if pp == ip and gg == g and kk <= k)
-                senza_nomi = [v[4] for v in mie if v[0] <= k and v[4] > 0]
+                senza_nomi = [v[4] for v in mie if v[0] <= k and v[4] > 0 and not v[6]]
+                in_piu = sum(v[4] for v in mie if v[0] <= k and v[6])
                 if pool.get("modo") == "somma":
-                    tot = nominati + sum(senza_nomi)
+                    tot = nominati + sum(senza_nomi) + in_piu
                 else:
-                    tot = max([nominati] + senza_nomi)
+                    tot = max([nominati + in_piu] + senza_nomi)
                 if pool.get("tetto_squadra") is not None:
                     con_squadra = any(v[5] for v in mie if v[0] <= k)
                     tetto = pool["tetto_squadra"] if con_squadra else pool.get("tetto_senza")
