@@ -5,7 +5,9 @@ Cosa fa, ogni volta che parte:
     (pagina "Agenti", colonna "LA28 Simulazioni": LA28 Beach Volley, LA28 Canoe, LA28 Cycling, LA 28 Judo,
     LA28 Skateboarding, LA28 Squash, LA28 Taekwondo, LA28 Tennis);
  2. per ogni atleta o squadra calcola un livello (Certo / Probabile / Possibile / Remoto / Fuori) e una percentuale;
- 3. scrive il risultato nel database Notion "Stima LA28" (solo le righe cambiate) e crea stima_la28.json per la pagina web.
+ 3. scrive il risultato nel database Notion "Stima LA28" (solo le righe cambiate) e crea stima_la28.json per la pagina web;
+ 4. conta le QUOTE italiane (posti-atleta) per sport, livello e genere: riepilogo nel log, in stima_la28.json
+    (chiave "quote") e nella pagina web. Il riepilogo non cambia ne' le righe ne' le colonne di Notion.
 
 Regole fisse:
  - se in Athletes la colonna "Pass LA28" vale Q, l'atleta e' CERTO (100%);
@@ -34,7 +36,7 @@ from datetime import date, datetime, timezone
 
 import requests
 
-from regole_la28 import RULES, sport_canonico
+from regole_la28 import RULES, sport_canonico, QUOTE_RIEPILOGO, GRUPPI_RIEPILOGO, SEPARA_RIEPILOGO
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
 _RAW_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
@@ -1730,6 +1732,267 @@ def scrivi(righe):
     return errori
 
 
+# --------------------------------------------------------------------------- riepilogo delle quote italiane per sport
+# Conta le QUOTE (posti-atleta) che l'Italia porterebbe a LA28, per sport, livello e genere. Non tocca le righe della
+# stima ne' Notion: il risultato va solo nel log, in stima_la28.json (chiave "quote") e nella pagina stima.html.
+# Le regole per contare (tetti per NOC, rose delle squadre, gruppi di prove) sono in regole_la28.py, QUOTE_RIEPILOGO.
+LIVELLI_QUOTE = ["Certo", "Probabile", "Possibile", "Remoto"]     # Fuori e Dati insufficienti non contano
+NOMI_GENERE = {"U": "Uomini", "D": "Donne", "X": "Misto"}
+MISTA = "M"            # prova mista (es. squadra mista dell'arco): i posti si dividono tra uomini e donne
+ANONIMA = re.compile(r"^\s*(italia|italy)\b", re.I)    # righe di squadra senza nomi: "Italia (uomini)", "Italy (ITA)"
+METODO_QUOTE = (
+    "Si contano i posti-atleta, non le righe: un atleta conta una volta sola per sport, al suo livello migliore "
+    "(anche se e' stimato in piu' prove o discipline dello stesso sport). Una squadra vale i suoi componenti (la rosa "
+    "olimpica negli sport di squadra); se una squadra si qualifica, i suoi componenti coprono anche le prove "
+    "individuali e non si sommano. Le prove miste valgono meta' uomini e meta' donne. Mai oltre il massimo di atleti "
+    "per nazione. Fuori e Dati insufficienti non sono contati."
+)
+
+
+def gruppo_riepilogo(r):
+    """Sport della riga -> sport del riepilogo (es. Open Water Swimming -> Swimming, basket 3x3 separato dal 5x5)."""
+    sport = GRUPPI_RIEPILOGO.get(r["sport"], r["sport"])
+    for sp, rx, nuovo in SEPARA_RIEPILOGO:
+        if sport == sp and re.search(rx, f"{r['disciplina']} {r['nome']}", re.I):
+            return nuovo
+    return sport
+
+
+def genere_quota(r, cfg):
+    """Genere dei posti della riga: "U" uomini, "D" donne, MISTA (da dividere), "X" Open, "?" non riconosciuto.
+    Si guarda prima la disciplina, poi il nome (es. "Italia (donne)")."""
+    if cfg.get("genere"):
+        return cfg["genere"]
+    for testo in (r["disciplina"], r["nome"]):
+        t = senza_emoji(testo).lower()
+        if re.search(r"mixed|\bmist[oa]\b|\bmix\b|\bnacra\b", t):
+            return MISTA
+        if re.search(r"\bwom[ae]n|\bfemmin|\bdonne\b|\bladies\b|heptathlon|\bwag\b", t):
+            return "D"
+        if re.search(r"\bm[ae]n\b|\bmens\b|\bmaschil|\buomini\b|decathlon|\bmag\b", t):
+            return "U"
+    return "?"
+
+
+def chiave_persona(nome):
+    """Nome di una persona -> insieme delle parole del nome, per riconoscerla in righe diverse.
+    Toglie le note tra parentesi quadre ([L], [R]), i segni in apice (²ˣʷᶜ, ᵒᶜ⁺ʷᶜ), le iniziali e la parola ITA."""
+    s = re.sub(r"\[.*?\]", " ", nome or "")
+    s = "".join(c for c in s if not unicodedata.decomposition(c).startswith(("<super>", "<sub>")))
+    return frozenset(t for t in toks(s) if len(t) > 1 and not t.isdigit())
+
+
+def persone_riga(nome):
+    """Persone con nome nella riga: [] per le righe di squadra senza nomi ("Italia", "Italy (ITA)"),
+    una persona per gli atleti, due per le coppie scritte "A/B" o "A / B"."""
+    if ANONIMA.match(nome or ""):
+        return []
+    parti = parti_squadra(nome) if "/" in (nome or "") else [nome]
+    return [k for k in (chiave_persona(p) for p in parti) if k]
+
+
+def posti_riga(pool, cfg, disciplina):
+    """Quanti posti vale una riga senza nomi: la prima regex di "posti" del pool che descrive la prova, altrimenti
+    la rosa (sport di squadra), altrimenti 1."""
+    for rx, n in pool.get("posti", []):
+        if re.search(rx, disciplina, re.I):
+            return n
+    return cfg.get("rosa") or 1
+
+
+class Persone:
+    """Le persone con nome di uno sport. Riconosce la stessa persona anche se il nome e' scritto in modo diverso:
+    stesse parole, oppure parole di uno contenute nell'altro (es. "Gottardi" e "Valentina GOTTARDI"), purche' non ci
+    siano due persone possibili."""
+
+    def __init__(self):
+        self.parole = []       # id -> insieme di parole
+        self.genere = []       # id -> "U" / "D" / None
+
+    def trova(self, tok):
+        uguali = [i for i, p in enumerate(self.parole) if p == tok]
+        if uguali:
+            return uguali[0]
+        simili = [i for i, p in enumerate(self.parole) if tok <= p or p <= tok]
+        if len(simili) == 1:
+            if len(tok) > len(self.parole[simili[0]]):
+                self.parole[simili[0]] = tok          # tengo la forma piu' completa del nome
+            return simili[0]
+        self.parole.append(tok)
+        self.genere.append(None)
+        return len(self.parole) - 1
+
+
+def _pool_di(cfg, disciplina):
+    """Indice del pool della prova: il primo la cui regex "prove" la descrive (None = tutte le righe rimaste)."""
+    for i, p in enumerate(cfg["pool"]):
+        if p.get("prove") is None or re.search(p["prove"], disciplina, re.I):
+            return i
+    return len(cfg["pool"]) - 1
+
+
+def _tetto(valore, g):
+    """Tetto del pool o dello sport per il genere g: un numero vale per tutti i generi, un dizionario per genere."""
+    if valore is None:
+        return None
+    if isinstance(valore, dict):
+        return valore.get(g)
+    return valore
+
+
+def quote_sport(nome, righe_sport, avvisi):
+    """Quote di uno sport. Restituisce {genere: [scalino Certo, scalino Probabile, scalino Possibile, scalino Remoto]},
+    dove ogni scalino e' il numero di posti a quel livello O MEGLIO."""
+    cfg = QUOTE_RIEPILOGO.get(nome)
+    if cfg is None:
+        avvisi.append(f"[DA VERIFICARE] {nome}: sport senza regole di conteggio in QUOTE_RIEPILOGO "
+                      "(contati gli atleti, senza tetto per nazione)")
+        cfg = {}
+    cfg = dict(cfg)
+    if "pool" not in cfg:                   # sport di squadra (rosa) o sport senza regole: un solo pool
+        rosa = cfg.get("rosa")
+        cfg["pool"] = [dict(nome="squadra", prove=None, tetto=rosa, posti=[(".", rosa)] if rosa else [])]
+        if rosa and "tetto" not in cfg:
+            cfg["tetto"] = rosa
+    persone = Persone()
+    grezze = []                             # (riga, livello 0-3, pool, genere, [id persone], posti senza nomi, squadra)
+    for r in righe_sport:
+        k = LIVELLI_QUOTE.index(r["livello"])
+        ip = _pool_di(cfg, r["disciplina"])
+        pool = cfg["pool"][ip]
+        g = genere_quota(r, cfg)
+        if g == "?":
+            avvisi.append(f"[DA VERIFICARE] {nome}: genere non riconosciuto per '{r['disciplina']}' "
+                          f"({r['nome']}): contato in Misto")
+            g = "X"
+        ids = [persone.trova(t) for t in persone_riga(r["nome"])]
+        posti = 0 if ids else posti_riga(pool, cfg, r["disciplina"])
+        squadra = bool(pool.get("squadra") and re.search(pool["squadra"], r["disciplina"], re.I))
+        if g in ("U", "D"):
+            for i in ids:
+                persone.genere[i] = persone.genere[i] or g      # il genere della persona serve alle prove miste
+        grezze.append((k, ip, g, ids, posti, squadra))
+    # le prove miste si dividono: meta' uomini, meta' donne (con un numero dispari, uno in piu' alle donne)
+    voci = []                               # (livello, pool, genere, [id], posti senza nomi, squadra)
+    for k, ip, g, ids, posti, squadra in grezze:
+        if g != MISTA:
+            voci.append((k, ip, g, ids, posti, squadra))
+            continue
+        n = len(ids) or posti
+        resto = {"U": n // 2, "D": n - n // 2}
+        per_genere = {"U": [], "D": []}
+        for i in ids:                       # prima chi ha gia' un genere dalle altre righe
+            gi = persone.genere[i]
+            if gi in resto and resto[gi] > 0:
+                per_genere[gi].append(i)
+                resto[gi] -= 1
+        for i in ids:                       # poi gli altri, a completare la composizione
+            if any(i in v for v in per_genere.values()):
+                continue
+            gi = "U" if resto["U"] > 0 else "D"
+            per_genere[gi].append(i)
+            resto[gi] -= 1
+            persone.genere[i] = persone.genere[i] or gi
+        for gi in ("U", "D"):
+            if ids and per_genere[gi]:
+                voci.append((k, ip, gi, per_genere[gi], 0, False))
+            elif not ids and resto[gi] > 0:
+                voci.append((k, ip, gi, [], resto[gi], False))
+    # livello migliore di ogni persona (e il pool e il genere in cui lo raggiunge): una persona conta una volta sola
+    migliore = {}
+    for k, ip, g, ids, _p, _s in voci:
+        for i in ids:
+            if i not in migliore or k < migliore[i][0]:
+                migliore[i] = (k, ip, g)
+    risultato = {}
+    for g in sorted({v[2] for v in voci}):
+        famiglie = {}
+        for ip, pool in enumerate(cfg["pool"]):
+            mie = [v for v in voci if v[1] == ip and v[2] == g]
+            if not mie and not any(m[1] == ip and m[2] == g for m in migliore.values()):
+                continue
+            scalini = []
+            for k in range(len(LIVELLI_QUOTE)):
+                nominati = sum(1 for (kk, pp, gg) in migliore.values() if pp == ip and gg == g and kk <= k)
+                senza_nomi = [v[4] for v in mie if v[0] <= k and v[4] > 0]
+                if pool.get("modo") == "somma":
+                    tot = nominati + sum(senza_nomi)
+                else:
+                    tot = max([nominati] + senza_nomi)
+                if pool.get("tetto_squadra") is not None:
+                    con_squadra = any(v[5] for v in mie if v[0] <= k)
+                    tetto = pool["tetto_squadra"] if con_squadra else pool.get("tetto_senza")
+                else:
+                    tetto = _tetto(pool.get("tetto"), g)
+                scalini.append(min(tot, tetto) if tetto is not None else tot)
+            fam = pool.get("famiglia") or f"#{ip}"
+            prec = famiglie.get(fam, [0] * len(LIVELLI_QUOTE))
+            famiglie[fam] = [a + b for a, b in zip(prec, scalini)]
+        totale = [0] * len(LIVELLI_QUOTE)
+        for fam, scalini in famiglie.items():
+            tetto_fam = cfg.get("famiglie", {}).get(fam)
+            if tetto_fam is not None:
+                scalini = [min(s, tetto_fam) for s in scalini]
+            totale = [a + b for a, b in zip(totale, scalini)]
+        tetto_sport = _tetto(cfg.get("tetto"), g)
+        if tetto_sport is not None:
+            totale = [min(s, tetto_sport) for s in totale]
+        elif cfg.get("tetto") is not None:
+            avvisi.append(f"[DA VERIFICARE] {nome}: nessun tetto per {NOMI_GENERE[g].lower()}")
+        risultato[g] = totale
+    if cfg.get("nota"):
+        avvisi.append(cfg["nota"])
+    return risultato
+
+
+def per_livello(scalini):
+    """Dagli scalini ("a quel livello o meglio") alle quote di ogni livello: differenza con lo scalino prima."""
+    out, prima = {}, 0
+    for liv, s in zip(LIVELLI_QUOTE, scalini):
+        out[liv] = s - prima
+        prima = s
+    out["Totale"] = scalini[-1] if scalini else 0
+    return out
+
+
+def riepilogo_quote(righe, log):
+    """Riepilogo delle quote italiane per sport, livello e genere (log + dati per stima_la28.json)."""
+    per_sport = {}
+    for r in righe:
+        if r["livello"] in LIVELLI_QUOTE:
+            per_sport.setdefault(gruppo_riepilogo(r), []).append(r)
+    avvisi, sport = [], []
+    vuoto = {liv: 0 for liv in LIVELLI_QUOTE + ["Totale"]}
+    tot = dict(vuoto, genere={NOMI_GENERE[g]: dict(vuoto) for g in ("U", "D", "X")})
+    for nome in sorted(per_sport, key=chiave_alfabetica):
+        q = quote_sport(nome, per_sport[nome], avvisi)
+        voce = dict(vuoto, nome=nome, genere={})
+        for g in ("U", "D", "X"):
+            if g not in q:
+                continue
+            liv = per_livello(q[g])
+            voce["genere"][NOMI_GENERE[g]] = liv
+            for k, v in liv.items():
+                voce[k] += v
+                tot[k] += v
+                tot["genere"][NOMI_GENERE[g]][k] += v
+        if voce["Totale"]:
+            sport.append(voce)
+    tot["genere"] = {k: v for k, v in tot["genere"].items() if v["Totale"]}
+    # log: una riga per sport con il totale e il dettaglio per genere
+    log("\n=== Quote italiane per sport (posti-atleta, non righe) ===")
+    intest = "".join(f"{x[:9]:>10}" for x in LIVELLI_QUOTE + ["Totale"])
+    log(f"  {'Sport':<22}{intest}   dettaglio per genere (C/Pb/Ps/R)")
+    for s in sport + [dict(tot, nome="TOTALE ITALIA")]:
+        dett = "  ".join(f"{gn[0]} {v['Certo']}/{v['Probabile']}/{v['Possibile']}/{v['Remoto']}"
+                         for gn, v in s["genere"].items())
+        log(f"  {s['nome'][:22]:<22}" + "".join(f"{s[x]:>10}" for x in LIVELLI_QUOTE + ["Totale"]) + f"   {dett}")
+    avvisi = list(dict.fromkeys(avvisi))           # senza doppioni, nell'ordine in cui sono comparsi
+    for a in avvisi:
+        log("  " + a)
+    return {"livelli": LIVELLI_QUOTE, "sport": sport, "totale": tot, "avvisi": avvisi, "metodo": METODO_QUOTE}
+
+
 # --------------------------------------------------------------------------- json per la pagina web
 METODO = [
     "Il livello Certo vale solo se in Athletes la colonna Pass LA28 e' Q. La colonna Status LA28 non viene usata.",
@@ -1768,7 +2031,7 @@ def chiave_alfabetica(t):
     return "".join(c for c in t if not unicodedata.combining(c)).casefold()
 
 
-def scrivi_json(righe, note):
+def scrivi_json(righe, note, quote=None):
     conteggi = {n: 0 for n in LIVELLI}
     sport = {}
     for r in righe:
@@ -1780,6 +2043,7 @@ def scrivi_json(righe, note):
     out = {
         "aggiornato": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "totali": conteggi, "sport": elenco, "metodo": METODO, "note": note,
+        "quote": quote,          # riepilogo delle quote italiane per sport (sezione nuova della pagina)
         "righe": [{"sport": r["sport"], "disciplina": r["disciplina"], "nome": r["nome"], "tipo": r["tipo"],
                    "livello": r["livello"], "p": r["p"], "via": r["via"], "rank": r["rank"], "margine": r["margine"],
                    "stato": r["stato"], "nota": r["nota"], "pass": r["pass_"], "fine": r["fine"]} for r in righe],
@@ -1851,7 +2115,8 @@ def main():
         if r["livello"] != "Dati insufficienti" and r["stato"] != "Non in classifica":
             log(f"  {r['sport']:<10} | {r['disciplina'][:34]:<34} | {r['nome'][:34]:<34} | {r['livello']:<9} | "
                 f"{('%.1f' % r['p']) if r['p'] is not None else '-':>5}% | {r['stato']:<10} | {r['via'][:40]}")
-    scrivi_json(righe, note)
+    quote = riepilogo_quote(righe, log)      # riepilogo delle quote: solo log e json, Notion non cambia
+    scrivi_json(righe, note, quote)
     if DRY_RUN:
         print(f"\nProva terminata: {len(righe)} righe calcolate, non e' stato scritto nulla su Notion.")
         return

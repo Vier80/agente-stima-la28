@@ -12,6 +12,10 @@ Come leggerlo (ogni sport e' un blocco):
 Dove i numeri non sono ancora definitivi (atletica, alcune prove a squadre) c'e' la nota "provvisorio".
 I nomi dello sport (alias) servono a riconoscere le diciture usate nel tuo db Athletes: se ne manca una, l'agente
 la segnala nel log tra gli "sport senza regole".
+
+In fondo al file c'e' anche QUOTE_RIEPILOGO: le regole per CONTARE le quote italiane (posti-atleta) nel riepilogo
+per sport. E' separato da RULES apposta: RULES decide le righe della Stima, QUOTE_RIEPILOGO serve solo al riepilogo
+e non cambia nessuna riga.
 """
 from datetime import date
 
@@ -143,3 +147,189 @@ def sport_canonico(nome_sport):
     """Nome usato nel tuo db Athletes -> nome standard delle regole (None se non c'e' una regola)."""
     k = "".join(ch for ch in (nome_sport or "").lower() if ch.isalnum())
     return ALIAS.get(k)
+
+
+# =====================================================================================================================
+# RIEPILOGO DELLE QUOTE ITALIANE PER SPORT (decisioni dell'11/11/2026, scheda 17 del progetto)
+# =====================================================================================================================
+# Serve SOLO al riepilogo (log, stima_la28.json, sezione della pagina stima.html): non cambia nessuna riga della Stima
+# e nessuna colonna di Notion.
+#
+# Cosa si conta: le QUOTE, cioe' i posti-atleta che l'Italia porterebbe a LA28, non le righe della Stima.
+#
+# Come si conta ("conteggio a scalini"), per ogni sport e genere, a ogni livello L
+# (prima Certo, poi Probabile, Possibile, Remoto):
+#   - nominati = persone diverse con un nome, ciascuna contata al suo livello MIGLIORE
+#   - squadra  = posti della squadra/staffetta piu' grande a quel livello o meglio (righe senza nomi: "Italia ...")
+#   - posti    = il piu' grande tra nominati e squadra (modo "pesca": la squadra pesca dagli individuali)
+#                oppure nominati + squadre (modo "somma": equipaggi e gruppi fatti di persone diverse)
+#   - mai oltre il tetto per NOC.
+# Le quote del livello L sono la differenza tra lo scalino di L e quello del livello prima.
+#
+# Come leggere un blocco di QUOTE_RIEPILOGO:
+#   tetto     massimo di atleti per NOC in tutto lo sport: {"U": uomini, "D": donne} oppure {"X": n} se lo sport e' Open
+#   genere    se c'e', il genere di tutte le righe dello sport ("U", "D" oppure "X" = Open, colonna Misto)
+#   rosa      solo sport di squadra: atleti per squadra (tabella ROSE della scheda 04)
+#   pool      gruppi di prove con un tetto proprio. Una riga va nel PRIMO pool la cui regex "prove" la descrive
+#             (prove = None: tutte le righe rimaste). Ogni pool puo' avere:
+#               modo           "pesca" (predefinito) oppure "somma"
+#               tetto          massimo per genere in quel pool (un numero, oppure {"U": .., "D": ..})
+#               tetto_squadra / tetto_senza / squadra
+#                              tetto se c'e' una squadra di quel genere a quel livello (riga che corrisponde
+#                              alla regex "squadra") / tetto senza squadra. Esempio arco ricurvo: 3 / 1.
+#               posti          [(regex, n), ...]: quanti posti vale una riga senza nomi ("Italia ...") di quella prova.
+#                              Se nessuna regex corrisponde vale "rosa" (sport di squadra) oppure 1.
+#               famiglia       nome di un insieme di pool con un tetto comune (vedi "famiglie")
+#   famiglie  {nome: tetto}: tetto comune di piu' pool (es. ciclismo su pista: velocita' + endurance = 8)
+#   nota      avviso da scrivere nel log e nella pagina quando lo sport ha quote
+#
+# Le prove miste (es. squadra mista dell'arco, staffetta mista) si dividono a meta' tra uomini e donne:
+# 2 posti = 1 uomo + 1 donna, 4 posti = 2 + 2. Il genere di una persona con nome si prende dalle sue altre righe
+# dello stesso sport; se non ne ha, si completa la composizione (prima gli uomini, poi le donne).
+
+# Etichette della Stima che nel riepilogo diventano un unico sport (stesso sport, discipline diverse: una persona
+# conta una volta sola).
+GRUPPI_RIEPILOGO = {
+    "Open Water Swimming": "Swimming",      # nuoto in corsia + acque libere
+    "Rowing Coastal": "Rowing",             # canottaggio + canottaggio costiero
+}
+# Etichette della Stima che nel riepilogo si dividono in due sport, in base alla disciplina (regex).
+# Il basket 5x5 e il 3x3 nella Stima sono entrambi "Basketball": nel riepilogo restano separati.
+SEPARA_RIEPILOGO = [
+    ("Basketball", r"3\s*x\s*3", "Basketball 3x3"),
+]
+
+QUOTE_RIEPILOGO = {
+    # ---------------------------------------------------------------- sport individuali con squadre o gruppi
+    "Archery": dict(
+        tetto={"U": 4, "D": 4},             # 3 ricurvo + 1 compound
+        pool=[
+            dict(nome="compound", prove=r"compound", tetto=1, posti=[(r"mixed|team", 2)]),
+            dict(nome="ricurvo", prove=None, tetto_squadra=3, tetto_senza=1, squadra=r"recurve team|team recurve",
+                 posti=[(r"mixed", 2), (r"team", 3)]),
+        ]),
+    "Artistic Gymnastics": dict(
+        tetto={"U": 5, "D": 5},
+        pool=[dict(nome="ginnastica", prove=None, tetto_squadra=5, tetto_senza=3, squadra=r"team",
+                   posti=[(r"team", 5)])]),
+    "Artistic Swimming": dict(
+        genere="D", tetto={"D": 8},
+        pool=[dict(nome="nuoto artistico", prove=None, tetto_squadra=8, tetto_senza=2, squadra=r"team",
+                   posti=[(r"team", 8), (r"duet", 2)])]),
+    "Athletics": dict(
+        tetto={"U": 63, "D": 63},           # 21 prove individuali x 3; max 1 staffetta per evento
+        pool=[dict(nome="atletica", prove=None, posti=[(r"4\s*x|relay|staffett", 4)])]),
+    "Badminton": dict(
+        tetto={"U": 8, "D": 8},
+        pool=[dict(nome="badminton", prove=None, posti=[(r"doubles|doppio", 2)])]),
+    "Beach Volleyball": dict(
+        tetto={"U": 4, "D": 4},             # 2 coppie
+        pool=[dict(nome="beach volley", prove=None, posti=[(r".", 2)])]),
+    "Boxing": dict(tetto={"U": 7, "D": 7}, pool=[dict(nome="pugilato", prove=None)]),
+    "Canoeing": dict(
+        tetto={"U": 11, "D": 11},
+        # "il piu' grande" (gli atleti fanno piu' prove), separando canoa e kayak, che sono atleti diversi
+        pool=[
+            dict(nome="slalom canoa", prove=r"slalom.*\bc1\b", tetto=2),
+            dict(nome="slalom kayak", prove=r"slalom", tetto=2),
+            dict(nome="sprint canoa", prove=r"sprint.*\bc[12]\b", tetto=3, posti=[(r"\bc2\b", 2)]),
+            dict(nome="sprint kayak", prove=r"sprint", tetto=5, posti=[(r"\bk4\b", 4), (r"\bk2\b", 2)]),
+        ]),
+    "Cycling": dict(
+        tetto={"U": 19, "D": 19},           # strada 4 + pista 8 + MTB 2 + BMX freestyle 2 + BMX racing 3
+        famiglie={"pista": 8},
+        pool=[
+            dict(nome="strada", prove=r"strada|road|crono|time trial", tetto=4),
+            dict(nome="BMX racing", prove=r"bmx rac", tetto=3),
+            dict(nome="BMX freestyle", prove=r"bmx free|freestyle|bmx park", tetto=2),
+            dict(nome="MTB", prove=r"mtb|mountain", tetto=2),
+            dict(nome="pista velocita'", prove=r"velocit|team sprint|sprint|keirin", famiglia="pista",
+                 posti=[(r"velocit|team sprint", 3)]),
+            dict(nome="pista endurance", prove=r"pista|track|inseguimento|pursuit|omnium|madison|americana",
+                 famiglia="pista", posti=[(r"inseguimento|pursuit", 4), (r"madison|americana", 2)]),
+        ],
+        nota="[DA VERIFICARE] Cycling: le righe della simulazione sono per nazione, senza nomi: sprint/keirin, MTB e "
+             "BMX valgono 1 atleta per riga; la strada non ha righe nella Stima."),
+    "Diving": dict(
+        tetto={"U": 8, "D": 8},
+        pool=[dict(nome="tuffi", prove=None, posti=[(r"synch|sincro", 2)])]),
+    "Equestrian": dict(
+        genere="X", tetto={"X": 9},         # Open: uomini e donne insieme
+        pool=[
+            dict(nome="dressage", prove=r"dressage", tetto_squadra=3, tetto_senza=1, squadra=r"team",
+                 posti=[(r"team", 3)]),
+            dict(nome="eventing", prove=r"eventing", tetto_squadra=3, tetto_senza=2, squadra=r"team",
+                 posti=[(r"team", 3)]),
+            dict(nome="jumping", prove=None, tetto_squadra=3, tetto_senza=1, squadra=r"team",
+                 posti=[(r"team", 3)]),
+        ]),
+    "Fencing": dict(
+        tetto={"U": 9, "D": 9},             # 3 armi: squadra di 3, oppure 1 senza squadra
+        pool=[
+            dict(nome="spada", prove=r"epee|spada", tetto_squadra=3, tetto_senza=1, squadra=r"team|squadr",
+                 posti=[(r"team|squadr", 3)]),
+            dict(nome="fioretto", prove=r"foil|fioretto", tetto_squadra=3, tetto_senza=1, squadra=r"team|squadr",
+                 posti=[(r"team|squadr", 3)]),
+            dict(nome="sciabola", prove=None, tetto_squadra=3, tetto_senza=1, squadra=r"team|squadr",
+                 posti=[(r"team|squadr", 3)]),
+        ]),
+    "Golf": dict(
+        tetto={"U": 4, "D": 4},
+        pool=[dict(nome="golf", prove=None, posti=[(r"team|mixed", 2)])]),
+    "Judo": dict(
+        tetto={"U": 7, "D": 7},
+        # la squadra mista non aggiunge posti (decisione 5): i componenti sono judoka gia' qualificati
+        pool=[dict(nome="judo", prove=None, posti=[(r"squadra mista|mixed|team", 0)])]),
+    "Modern Pentathlon": dict(tetto={"U": 2, "D": 2}, pool=[dict(nome="pentathlon", prove=None)]),
+    "Rhythmic Gymnastics": dict(
+        genere="D", tetto={"D": 7},         # 2 individuali + 5 del gruppo (persone diverse: si sommano)
+        pool=[
+            dict(nome="gruppo", prove=r"group|gruppo", tetto=5, posti=[(r".", 5)]),
+            dict(nome="individuali", prove=None, tetto=2),
+        ]),
+    "Rowing": dict(
+        tetto={"U": 23, "D": 23},           # canottaggio + costiero, 1 barca per evento
+        pool=[dict(nome="barche", prove=None, modo="somma",
+                   posti=[(r"eight|8\+", 8), (r"four|quad|4x|4-", 4), (r"pair|double|2x|2-", 2)])]),
+    "Sailing": dict(
+        tetto={"U": 7, "D": 7},
+        pool=[dict(nome="barche", prove=None, modo="somma", posti=[(r"470|nacra|49er|skiff", 2)])]),
+    "Shooting": dict(
+        tetto={"U": 12, "D": 12},
+        pool=[dict(nome="tiro", prove=None, posti=[(r"mixed|team", 2)])]),
+    "Skateboarding": dict(tetto={"U": 6, "D": 6}, pool=[dict(nome="skate", prove=None)]),
+    "Sport Climbing": dict(tetto={"U": 6, "D": 6}, pool=[dict(nome="arrampicata", prove=None)]),
+    "Squash": dict(tetto={"U": 2, "D": 2}, pool=[dict(nome="squash", prove=None)]),
+    "Surfing": dict(tetto={"U": 2, "D": 2}, pool=[dict(nome="surf", prove=None)]),
+    "Swimming": dict(
+        tetto={"U": 28, "D": 28},           # corsia + acque libere; staffette: pescano dagli individuali
+        pool=[dict(nome="nuoto", prove=None, posti=[(r"4\s*x|relay|staffett", 4)])]),
+    "Table Tennis": dict(
+        tetto={"U": 3, "D": 3},
+        pool=[dict(nome="tennistavolo", prove=None, posti=[(r"team|squadr", 6), (r"doubles|doppio", 2)])]),
+    "Taekwondo": dict(tetto={"U": 4, "D": 4}, pool=[dict(nome="taekwondo", prove=None)]),
+    "Tennis": dict(
+        tetto={"U": 6, "D": 6},
+        pool=[dict(nome="tennis", prove=None, posti=[(r"doubles|doppio", 2)])]),
+    "Trampoline": dict(tetto={"U": 2, "D": 2}, pool=[dict(nome="trampolino", prove=None)]),
+    "Triathlon": dict(
+        tetto={"U": 3, "D": 3},
+        pool=[dict(nome="triathlon", prove=None, posti=[(r"relay|mixed|staffett", 4)])]),
+    "Weightlifting": dict(tetto={"U": 3, "D": 3}, pool=[dict(nome="pesi", prove=None)]),
+    "Wrestling": dict(tetto={"U": 12, "D": 6}, pool=[dict(nome="lotta", prove=None)]),
+
+    # ---------------------------------------------------------------- sport di squadra (rosa: tabella ROSE)
+    "Baseball": dict(genere="U", rosa=24),
+    "Basketball": dict(rosa=12),
+    "Basketball 3x3": dict(rosa=4),
+    "Cricket": dict(rosa=15),
+    "Flag Football": dict(rosa=10),
+    "Football": dict(rosa=18),
+    "Handball": dict(rosa=14),
+    "Hockey": dict(rosa=16),
+    "Lacrosse": dict(rosa=11),
+    "Rugby Sevens": dict(rosa=12),
+    "Softball": dict(genere="D", rosa=15),
+    "Volleyball": dict(rosa=12),
+    "Water Polo": dict(rosa=11),
+}
