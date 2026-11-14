@@ -51,8 +51,6 @@ RULES = {
     "Wrestling": dict(kind="ind", quota=16, prove_valide=[r"^M\|.*(57|65|74|86|97|125)kg fs", r"^M\|.*(60|67|77|87|97|130)kg gr",
                                                           r"^W\|.*(50|53|57|62|68|76)kg ww"], max_noc=1, rank_share=0.6, fine=d("2028-06-30"), alias=["wrestling"],
                       note="provvisorio: i posti per categoria dipendono dal regolamento UWW per LA28"),
-    "Weightlifting": dict(kind="ind", quota=12, max_noc=1, rank_share=0.8, fine=d("2028-05-07"),
-                          alias=["weightlifting"]),
     "Artistic Gymnastics": dict(kind="ind", quota=24, max_noc=4, rank_share=0.7, fine=d("2028-05-31"),
                                 quota_by=[("team", 12)], alias=["gymartistic", "artisticgymnastics"], team_size=4),
     "Rhythmic Gymnastics": dict(kind="ind", quota=24, max_noc=2, rank_share=0.7, fine=d("2028-05-31"),
@@ -315,6 +313,7 @@ QUOTE_RIEPILOGO = {
     "Triathlon": dict(
         tetto={"U": 3, "D": 3},
         pool=[dict(nome="triathlon", prove=None, posti=[(r"relay|mixed|staffett", 4)])]),
+    # pesi: 1 per categoria, al massimo 3 delle 6 categorie per genere (4 solo con il titolo Best Lifter, non contato)
     "Weightlifting": dict(tetto={"U": 3, "D": 3}, pool=[dict(nome="pesi", prove=None)]),
     "Wrestling": dict(tetto={"U": 12, "D": 6}, pool=[dict(nome="lotta", prove=None)]),
 

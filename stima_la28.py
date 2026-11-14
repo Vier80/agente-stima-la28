@@ -3,7 +3,7 @@
 Cosa fa, ogni volta che parte:
  1. legge dal tuo Notion gli atleti italiani (db Athletes) e le simulazioni gia' prodotte dagli altri agenti
     (pagina "Agenti", colonna "LA28 Simulazioni": LA28 Beach Volley, LA28 Canoe, LA28 Cycling, LA 28 Judo,
-    LA28 Skateboarding, LA28 Squash, LA28 Taekwondo, LA28 Tennis);
+    LA28 Skateboarding, LA28 Squash, LA28 Taekwondo, LA28 Tennis, LA28 Weightlifting);
  2. per ogni atleta o squadra calcola un livello (Certo / Probabile / Possibile / Remoto / Fuori) e una percentuale;
  3. scrive il risultato nel database Notion "Stima LA28" (solo le righe cambiate) e crea stima_la28.json per la pagina web;
  4. conta le QUOTE italiane (posti-atleta) per sport, livello e genere: riepilogo nel log, in stima_la28.json
@@ -13,8 +13,8 @@ Regole fisse:
  - se in Athletes la colonna "Pass LA28" vale Q, l'atleta e' CERTO (100%);
  - la colonna "Status LA28" di Athletes NON viene mai usata;
  - gli sport invernali sono esclusi;
- - beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo e tennis usano le simulazioni gia' presenti
-   in Notion (elenco SIMS qui sotto);
+ - beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis e sollevamento pesi usano le
+   simulazioni gia' presenti in Notion (elenco SIMS qui sotto);
  - tutte le altre discipline estive (lotta compresa, finche' USA_MODELLO_WRESTLING e' False) usano le regole del CIO
    (file regole_la28.py) applicate ai punteggi del db Athletes
    (classifica per prova di tutte le nazioni, limite per nazione, posti disponibili): stima approssimata, da affinare;
@@ -103,6 +103,12 @@ SIMS = [
          fine=date(2028, 5, 16), copertura="ind", alias=["taekwondo"]),
     dict(label="Tennis", db="40ff48c9aad980bcb44add4e19816b05", titoli=["la28 tennis", "la 28 tennis"],
          fine=date(2028, 6, 30), copertura="parziale", alias=["tennis"]),
+    # Sollevamento pesi (dal 14/11/2026): simulazione dell'agente agente-weightlifting, calcolata dai results book IWF.
+    # Copertura "parziale" fino al Mondiale 2027 (decisione dell'utente): chi non ha ancora gareggiato in un evento
+    # di qualificazione resta "Dati insufficienti" invece di "Fuori". Dopo il Mondiale 2027 si passa a "ind".
+    dict(label="Weightlifting", db="418f48c9aad98105acd3c7d39a805b89",
+         titoli=["la28 weightlifting", "la 28 weightlifting"],
+         fine=date(2028, 5, 7), copertura="parziale", alias=["weightlifting"]),
 ]
 SIM_PER_LABEL = {s["label"]: s for s in SIMS}
 
@@ -138,12 +144,12 @@ INVERNALI = {
 
 # Per alcuni sport il valore che conta non e' "Punti per Disciplina" ma una colonna dedicata di Athletes.
 # sport -> (sigla della colonna, come leggere il valore): "punti" = piu' alto e' meglio, "posizione" = piu' basso e' meglio.
-# Le colonne si trovano dalla sigla (le emoji nel nome non contano): WON, FEN, WB, UWW, KG.
+# Le colonne si trovano dalla sigla (le emoji nel nome non contano): WON, FEN, WB, UWW.
+# (Il sollevamento pesi non usa piu' la colonna KG di Athletes: ha la sua simulazione in SIMS.)
 METRICHE = {
     "Badminton": ("WON", "punti"), "Table Tennis": ("WON", "punti"), "Sailing": ("WON", "punti"),
     "Sport Climbing": ("WON", "punti"), "Archery": ("WON", "punti"), "Triathlon": ("WON", "punti"),
     "Fencing": ("FEN", "punti"), "Boxing": ("WB", "punti"), "Wrestling": ("UWW", "punti"),
-    "Weightlifting": ("KG", "punti"),
     "Golf": ("WON", "punti"),
     "Diving": ("SCORE", "punti"), "Artistic Swimming": ("SCORE", "punti"),
     "Swimming": ("PFM", "tempo"),       # tempo: il valore piu' basso e' il migliore
@@ -809,8 +815,8 @@ def gruppo(r):
 
 
 def etichetta_disciplina(r):
-    if r["sport"] in ("Judo", "Taekwondo"):
-        return " ".join(x for x in (r["genere"], r["cat"]) if x)
+    if r["sport"] in ("Judo", "Taekwondo", "Weightlifting"):
+        return " ".join(x for x in (r["genere"], r["cat"]) if x)          # "Uomini 65 kg"
     if r["sport"] == "Tennis":
         return r["evento"] or r["disc"]
     if r["sport"] in ("Beach Volleyball", "Skateboarding"):
@@ -2071,7 +2077,8 @@ def riepilogo_quote(righe, log):
 # --------------------------------------------------------------------------- json per la pagina web
 METODO = [
     "Il livello Certo vale solo se in Athletes la colonna Pass LA28 e' Q. La colonna Status LA28 non viene usata.",
-    "Beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo e tennis partono dalle simulazioni gia' presenti "
+    "Beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis e sollevamento pesi partono dalle "
+    "simulazioni gia' presenti "
     "in Notion (ranking olimpico attuale): il margine e' la distanza in posti tra l'atleta, la coppia o la nazione e l'ultimo "
     "posto utile della stessa categoria. Le riserve valgono in base alla distanza da quel posto; chi e' candidato a un torneo "
     "finale (Q-Series del beach volley, torneo finale dello squash) riceve la sua quota dei posti del torneo in proporzione "
@@ -2091,7 +2098,7 @@ METODO = [
     "Livelli: Probabile 70% o piu', Possibile 35-69%, Remoto 8-34%, Fuori sotto l'8%. Se mancano punteggi o ranking l'agente "
     "scrive 'Dati insufficienti' invece di inventare un numero.",
     "Per alcuni sport il punteggio non e' la colonna 'Punti per Disciplina' ma una colonna dedicata di Athletes: WON (badminton, "
-    "tennis tavolo, vela, arrampicata, arco individuale, triathlon, golf), FEN (scherma), WB (pugilato), UWW (lotta), KG (pesi), "
+    "tennis tavolo, vela, arrampicata, arco individuale, triathlon, golf), FEN (scherma), WB (pugilato), UWW (lotta), "
     "SCORE (tuffi, nuoto artistico), PFM (nuoto e atletica: tempo piu' basso = meglio per nuoto, corsa, marcia; misura piu' alta = "
     "meglio per salti, lanci e prove multiple).",
     "Sono elencate anche le prove del programma LA28 in cui in Athletes non c'e' nessun atleta o squadra italiana: "
