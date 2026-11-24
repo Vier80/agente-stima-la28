@@ -3,7 +3,7 @@
 Cosa fa, ogni volta che parte:
  1. legge dal tuo Notion gli atleti italiani (db Athletes) e le simulazioni gia' prodotte dagli altri agenti
     (pagina "Agenti", colonna "LA28 Simulazioni": LA28 Beach Volley, LA28 Canoe, LA28 Cycling, LA 28 Judo,
-    LA28 Skateboarding, LA28 Squash, LA28 Taekwondo, LA28 Tennis, LA28 Weightlifting);
+    LA28 Skateboarding, LA28 Squash, LA28 Taekwondo, LA28 Tennis, LA28 Weightlifting, LA28 Triathlon);
  2. per ogni atleta o squadra calcola un livello (Certo / Probabile / Possibile / Remoto / Fuori) e una percentuale;
  3. scrive il risultato nel database Notion "Stima LA28" (solo le righe cambiate) e crea stima_la28.json per la pagina web;
  4. conta le QUOTE italiane (posti-atleta) per sport, livello e genere: riepilogo nel log, in stima_la28.json
@@ -13,8 +13,8 @@ Regole fisse:
  - se in Athletes la colonna "Pass LA28" vale Q, l'atleta e' CERTO (100%);
  - la colonna "Status LA28" di Athletes NON viene mai usata;
  - gli sport invernali sono esclusi;
- - beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis e sollevamento pesi usano le
-   simulazioni gia' presenti in Notion (elenco SIMS qui sotto);
+ - beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis, sollevamento pesi e triathlon
+   usano le simulazioni gia' presenti in Notion (elenco SIMS qui sotto);
  - tutte le altre discipline estive (lotta compresa, finche' USA_MODELLO_WRESTLING e' False) usano le regole del CIO
    (file regole_la28.py) applicate ai punteggi del db Athletes
    (classifica per prova di tutte le nazioni, limite per nazione, posti disponibili): stima approssimata, da affinare;
@@ -55,6 +55,9 @@ ALT_ROUTE = 0.08          # chance residua (continentali / riassegnazioni) per c
 VICINO = 2.0              # "vicino" = ranking entro 2 volte la soglia
 BASE_STATO = {"in attesa": 0.05}
 VIA_FISSA = [             # (parola nella via, probabilita') per chi e' dentro ma non per ranking diretto
+    # triathlon: "Mondiale staffetta mista 2027 (proiezione)" = Mondiale non ancora disputato (prima di "mondiale"!);
+    # "Mondiale staffetta mista 2026/2027" = posto gia' vinto dalla nazione
+    ("proiezione", 0.30), ("mondiale staffetta", 0.90),
     ("universal", 0.05), ("invito", 0.05), ("riassegn", 0.35), ("continent", 0.50),
     ("grand slam", 0.60), ("champ", 0.60), ("mondiali", 0.30), ("q-series", 0.20), ("torneo", 0.15),
     ("ospitant", 0.90), ("paese", 0.90),
@@ -80,6 +83,14 @@ COLORI = {"Certo": "green", "Probabile": "blue", "Possibile": "yellow", "Remoto"
 #   nominativi True se la simulazione e' per nazione ma la colonna Atleti ha i nomi (ciclismo): nelle prove
 #             individuali si scrive una riga per atleta, nelle prove a squadre una riga "Italia (uomini/donne)"
 #   alias     nomi dello sport usati nella colonna Sport di Athletes (minuscolo, solo lettere e numeri)
+# Opzioni usate solo dal triathlon (dal 24/11/2026):
+#   vie_ranking   regex delle vie che contano come "ranking": decidono la soglia (ultimo posto utile) e il calcolo del
+#                 margine. Senza questa opzione vale la funzione via_ranking (parole ranking/diretta/oqr...).
+#   squadra_titolo regex del titolo delle righe di squadra (es. "Squadra Italy"): la riga diventa "Italia", tipo Squadra
+#   via_squadra   regex delle vie individuali che dipendono dalla squadra (posti della staffetta): la probabilita'
+#                 dell'atleta unisce quella della squadra italiana e quella del ranking individuale
+#   terzo_posto   (regex nei Dettagli, n): il 3º posto della nazione vale solo con 3 atleti nei primi n del ranking
+#                 olimpico individuale; la probabilita' non puo' superare quella di restare entro il posto n
 SIMS = [
     dict(label="Beach Volleyball", db="7706c27fb15f4fd181db1c09a2bd0fe2",
          titoli=["la28 beach volley", "la 28 beach volley", "la28 beachvolley"],
@@ -109,6 +120,18 @@ SIMS = [
     dict(label="Weightlifting", db="418f48c9aad98105acd3c7d39a805b89",
          titoli=["la28 weightlifting", "la 28 weightlifting"],
          fine=date(2028, 5, 7), copertura="parziale", alias=["weightlifting"]),
+    # Triathlon (dal 24/11/2026): simulazione dell'agente agente-triathlon-la28 (scheda 59 del progetto).
+    # Il db si chiama "3️⃣ LA28 Triathlon": il "3" dell'emoji resta nel titolo, per questo c'e' anche "3 la28 triathlon".
+    # Ranking delle righe individuali = ranking olimpico individuale (IOQR); delle righe "Squadra ..." = ranking
+    # olimpico della staffetta (MROQR). La soglia individuale si calcola solo sulle vie del ranking individuale
+    # (i posti della staffetta e i New Flag hanno ranking IOQR molto piu' bassi e la falserebbero).
+    dict(label="Triathlon", db="422f48c9aad98159adaff446eb4cc6ab",
+         titoli=["la28 triathlon", "la 28 triathlon", "3 la28 triathlon"],
+         fine=RULES["Triathlon"]["fine"], copertura="ind", alias=["triathlon"],
+         vie_ranking=r"^ranking olimpico individuale|^squadra staffetta",
+         squadra_titolo=r"^squadra\b",
+         via_squadra=r"^ranking olimpico staffetta",
+         terzo_posto=(r"3\s*[º°o]\s*posto", 30)),
 ]
 SIM_PER_LABEL = {s["label"]: s for s in SIMS}
 
@@ -145,10 +168,11 @@ INVERNALI = {
 # Per alcuni sport il valore che conta non e' "Punti per Disciplina" ma una colonna dedicata di Athletes.
 # sport -> (sigla della colonna, come leggere il valore): "punti" = piu' alto e' meglio, "posizione" = piu' basso e' meglio.
 # Le colonne si trovano dalla sigla (le emoji nel nome non contano): WON, FEN, WB, UWW.
-# (Il sollevamento pesi non usa piu' la colonna KG di Athletes: ha la sua simulazione in SIMS.)
+# (Il sollevamento pesi non usa piu' la colonna KG di Athletes e il triathlon la colonna WON: hanno la loro
+# simulazione in SIMS.)
 METRICHE = {
     "Badminton": ("WON", "punti"), "Table Tennis": ("WON", "punti"), "Sailing": ("WON", "punti"),
-    "Sport Climbing": ("WON", "punti"), "Archery": ("WON", "punti"), "Triathlon": ("WON", "punti"),
+    "Sport Climbing": ("WON", "punti"), "Archery": ("WON", "punti"),
     "Fencing": ("FEN", "punti"), "Boxing": ("WB", "punti"), "Wrestling": ("UWW", "punti"),
     "Golf": ("WON", "punti"),
     "Diving": ("SCORE", "punti"), "Artistic Swimming": ("SCORE", "punti"),
@@ -819,8 +843,9 @@ def etichetta_disciplina(r):
         return " ".join(x for x in (r["genere"], r["cat"]) if x)          # "Uomini 65 kg"
     if r["sport"] == "Tennis":
         return r["evento"] or r["disc"]
-    if r["sport"] in ("Beach Volleyball", "Skateboarding"):
-        return r["evento"] or " ".join(x for x in (r["disc"], r["genere"]) if x)   # "Torneo maschile", "Park femminile"
+    if r["sport"] in ("Beach Volleyball", "Skateboarding", "Triathlon"):
+        # "Torneo maschile", "Park femminile", "Individuale maschile", "Staffetta mista"
+        return r["evento"] or " ".join(x for x in (r["disc"], r["genere"]) if x)
     if r["sport"] == "Squash":
         return r["cat"] or " ".join(x for x in ("Singolare", r["genere"]) if x)    # "Singolare maschile"
     return " - ".join(x for x in (r["disc"], r["evento"], r["genere"]) if x)
@@ -951,7 +976,9 @@ def genere_prova(testo):
 
 
 def parole_prova(testo, fam, extra=()):
-    """Testo della prova -> (numeri, parole): '+100kg' e '-100kg' restano diversi, '3x3' resta un'unica parola."""
+    """Testo della prova -> (numeri, parole): '+100kg' e '-100kg' restano diversi, '3x3' resta un'unica parola.
+    Le emoji-numero usate come icona (es. '3️⃣Mixed Relay' del triathlon) si tolgono: il loro numero non e' della prova."""
+    testo = re.sub("[0-9#*]️?⃣", " ", testo or "")
     t = senza_emoji(testo).lower().replace("+", " piu ").replace("3x3", " tretre ").replace("'", " ")
     t = re.sub(r"(\d)([a-z])", r"\1 \2", t)
     t = re.sub(r"([a-z])(\d)", r"\1 \2", t)
@@ -1102,7 +1129,11 @@ def livello(p):
     return "Fuori"
 
 
-def via_ranking(via):
+def via_ranking(via, rx=None):
+    """True se la via e' un posto da ranking. rx = regex dello sport (opzione vie_ranking di SIMS): se c'e', decide
+    solo lei (triathlon: conta solo il ranking olimpico individuale, e per le squadre quello della staffetta)."""
+    if rx:
+        return bool(re.search(rx, via or "", re.I))
     v = (via or "").lower()
     # "Ranking WSR (posto ospitante riassegnato)", "Qualificazione diretta (posto ospitante riassegnato)":
     # il posto del paese ospitante torna al ranking, quindi e' un posto da ranking a tutti gli effetti
@@ -1136,18 +1167,19 @@ def via_fissa(via, default=0.50):
     return next((pp for w, pp in VIA_FISSA if w in v), default)
 
 
-def soglie(rows):
-    """Per ogni gruppo (categoria/prova): ultimo ranking tra quelli dentro per ranking diretto."""
+def soglie(rows, rx=None):
+    """Per ogni gruppo (categoria/prova): ultimo ranking tra quelli dentro per ranking diretto.
+    rx = regex delle vie da ranking dello sport (vedi via_ranking)."""
     cut = {}
     for r in rows:
-        if r["stato"].lower() in IN_STATI and via_ranking(r["via"]) and r["rank"]:
+        if r["stato"].lower() in IN_STATI and via_ranking(r["via"], rx) and r["rank"]:
             g = gruppo(r)
             cut[g] = max(cut.get(g, 0), r["rank"])
     return cut
 
 
-def stima_sim(r, cut, tornei=None):
-    """Restituisce (probabilita' 0-100, margine, motivazione)."""
+def stima_sim(r, cut, tornei=None, rx=None):
+    """Restituisce (probabilita' 0-100, margine, motivazione). rx = regex delle vie da ranking dello sport."""
     st = r["stato"].lower()
     via = (r["via"] or "").lower()
     end = r["end"]
@@ -1161,7 +1193,7 @@ def stima_sim(r, cut, tornei=None):
         margine = c - rank
         p_rank = logistica((margine + 0.5) / sigma)
     if st in IN_STATI:
-        if via_ranking(r["via"]):
+        if via_ranking(r["via"], rx):
             if p_rank is None:
                 return 60.0, None, "dentro nella simulazione, ma senza ranking utilizzabile per misurare il margine"
             p = min(0.97, max(0.05, p_rank))
@@ -1528,21 +1560,37 @@ def costruisci(tutti, sims, wrest, log):
     nomi_sim = {}        # sport -> parole di ogni nome italiano nella simulazione (per non dare "Fuori" a chi c'e' ma non e' abbinato)
     for sport, rows in sims.items():
         cfg = SIM_PER_LABEL.get(sport, {})
-        cut = soglie(rows)
+        rx = cfg.get("vie_ranking")             # None = regola generale di via_ranking
+        cut = soglie(rows, rx)
         tornei = contesto_tornei(rows)
+        # triathlon: probabilita' della squadra italiana di staffetta (riga "Squadra Italy"), che serve agli atleti
+        # che hanno il posto grazie alla staffetta (via "Ranking olimpico staffetta")
+        p_squadra = None
+        if cfg.get("via_squadra") and cfg.get("squadra_titolo"):
+            for r in rows:
+                if is_italiano(r) and re.search(cfg["squadra_titolo"], r["nome"] or "", re.I):
+                    p_squadra = stima_sim(r, cut, tornei, rx)
+                    break
         for r in rows:
             if not is_italiano(r):
                 continue
             nome = r["nome"] or "(senza nome)"
-            if RITIRATI_ITA and not r["atleti"] and "/" not in nome and cfg.get("copertura") != "nazione":
+            # riga di squadra indicata dal titolo (triathlon: "Squadra Italy" -> "Italia", come le altre staffette)
+            squadra_tit = bool(cfg.get("squadra_titolo") and re.search(cfg["squadra_titolo"], nome, re.I))
+            if squadra_tit:
+                nome = "Italia" + (f" ({r['genere'].lower()})" if r["genere"] else "")     # "Italia (misto)"
+            if RITIRATI_ITA and not squadra_tit and not r["atleti"] and "/" not in nome and cfg.get("copertura") != "nazione":
                 rit = rub_rit.cerca(nome, sport)
                 if rit and not rub.cerca(nome, sport):
                     scartati_rit.append(f"{sport}: {nome}")
                     continue       # atleta ritirato ancora presente nella simulazione
             nomi_sim.setdefault(sport, []).append({x for x in toks_utili(r["atleti"] or nome) if len(x) >= 3})
-            squadra = bool(r["atleti"]) or "/" in nome or "(ITA)" in nome.upper() or cfg.get("copertura") == "nazione"
+            squadra = (squadra_tit or bool(r["atleti"]) or "/" in nome or "(ITA)" in nome.upper()
+                       or cfg.get("copertura") == "nazione")
             trovati = []
-            if squadra and cfg.get("riga_unica"):
+            if squadra_tit:
+                nomi = []          # la squadra non ha nomi da cercare in Athletes
+            elif squadra and cfg.get("riga_unica"):
                 # in Athletes la coppia e' una riga sola ("Valentina GOTTARDI/Reka ORSI TOTH")
                 nomi = [r["atleti"] or nome]
                 trovati = [rub.cerca(nomi[0], sport)]
@@ -1561,8 +1609,34 @@ def costruisci(tutti, sims, wrest, log):
             if certo:
                 p, marg, nota = 100.0, None, "in Athletes la colonna Pass LA28 e' Q: qualificazione acquisita"
                 liv = "Certo"
+            elif cfg.get("via_squadra") and re.search(cfg["via_squadra"], r["via"] or "", re.I):
+                # triathlon: posto individuale ottenuto grazie alla staffetta (i 2 migliori del NOC nel ranking
+                # individuale). Due strade: la squadra resta tra le qualificate OPPURE l'atleta entra dal ranking
+                # individuale. p = 1 - (1 - p squadra) x (1 - p individuale), al massimo 97%.
+                p_ind, marg_ind, nota_ind = stima_sim(dict(r, via="Ranking olimpico individuale"), cut, tornei, rx)
+                if p_squadra:
+                    p_sq, marg, nota_sq = p_squadra
+                    p = round(min(97.0, 100 * (1 - (1 - p_sq / 100) * (1 - p_ind / 100))), 1)
+                    nota = (f"posto ottenuto con la staffetta: squadra italiana {p_sq:g}% ({nota_sq}); in alternativa "
+                            f"ranking olimpico individuale {p_ind:g}% ({nota_ind}); il margine e' quello della squadra")
+                else:
+                    p, marg = p_ind, marg_ind
+                    nota = (f"posto ottenuto con la staffetta, ma nella simulazione non c'e' la riga della squadra "
+                            f"italiana: stimato solo con il ranking individuale ({nota_ind})")
+                liv = livello(p)
             else:
-                p, marg, nota = stima_sim(r, cut, tornei)
+                p, marg, nota = stima_sim(r, cut, tornei, rx)
+                terzo = cfg.get("terzo_posto")
+                if terzo and re.search(terzo[0], r["dett"] or "", re.I) and r["rank"]:
+                    # triathlon: il 3º posto di un NOC vale solo se il NOC ha almeno 3 atleti nei primi 30 del ranking
+                    # olimpico individuale. Il margine che conta e' quello dal 30º posto, non dall'ultimo posto utile.
+                    limite = terzo[1]
+                    sigma3 = max(1.5, limite * (0.05 + 0.02 * math.sqrt(mesi_rimasti(r["end"]))))
+                    p3 = logistica((limite - r["rank"] + 0.5) / sigma3) * 100
+                    if p3 < p:
+                        p, marg = round(max(5.0, p3), 1), limite - r["rank"]
+                        nota = (f"3º posto della nazione: vale solo con almeno 3 atleti nei primi {limite} del ranking "
+                                f"olimpico individuale; ranking {r['rank']:g}, margine {marg:+g} dal {limite}º posto")
                 liv = livello(p)
             dettaglio = nota + ("; " + r["dett"] if r["dett"] else "")
             if cfg.get("nominativi") and squadra:
@@ -2077,13 +2151,16 @@ def riepilogo_quote(righe, log):
 # --------------------------------------------------------------------------- json per la pagina web
 METODO = [
     "Il livello Certo vale solo se in Athletes la colonna Pass LA28 e' Q. La colonna Status LA28 non viene usata.",
-    "Beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis e sollevamento pesi partono dalle "
-    "simulazioni gia' presenti "
+    "Beach volley, canoa, ciclismo, judo, skateboarding, squash, taekwondo, tennis, sollevamento pesi e triathlon "
+    "partono dalle simulazioni gia' presenti "
     "in Notion (ranking olimpico attuale): il margine e' la distanza in posti tra l'atleta, la coppia o la nazione e l'ultimo "
     "posto utile della stessa categoria. Le riserve valgono in base alla distanza da quel posto; chi e' candidato a un torneo "
     "finale (Q-Series del beach volley, torneo finale dello squash) riceve la sua quota dei posti del torneo in proporzione "
     "al ranking, piu' la chance di rientrare dal ranking diretto; i posti ipotizzati (es. vincitore continentale non ancora "
     "deciso) hanno una stima prudenziale fissa.",
+    "Triathlon: il margine individuale si misura solo sui posti del ranking olimpico individuale; chi ha il posto grazie "
+    "alla staffetta mista vale la probabilita' che la squadra italiana resti tra le qualificate, piu' la strada del "
+    "ranking individuale; il 3º posto di una nazione vale solo se ha 3 atleti nei primi 30 del ranking olimpico.",
     "Tutte le altre discipline estive, lotta compresa, usano i regolamenti di qualificazione del CIO (posti per prova, limite per nazione, "
     "data di chiusura) applicati ai punteggi del db Athletes: per ogni prova si ordinano gli atleti di tutte le nazioni, "
     "si applica il limite per nazione e si guarda se l'atleta e' entro i posti assegnati dal ranking.",
@@ -2098,7 +2175,7 @@ METODO = [
     "Livelli: Probabile 70% o piu', Possibile 35-69%, Remoto 8-34%, Fuori sotto l'8%. Se mancano punteggi o ranking l'agente "
     "scrive 'Dati insufficienti' invece di inventare un numero.",
     "Per alcuni sport il punteggio non e' la colonna 'Punti per Disciplina' ma una colonna dedicata di Athletes: WON (badminton, "
-    "tennis tavolo, vela, arrampicata, arco individuale, triathlon, golf), FEN (scherma), WB (pugilato), UWW (lotta), "
+    "tennis tavolo, vela, arrampicata, arco individuale, golf), FEN (scherma), WB (pugilato), UWW (lotta), "
     "SCORE (tuffi, nuoto artistico), PFM (nuoto e atletica: tempo piu' basso = meglio per nuoto, corsa, marcia; misura piu' alta = "
     "meglio per salti, lanci e prove multiple).",
     "Sono elencate anche le prove del programma LA28 in cui in Athletes non c'e' nessun atleta o squadra italiana: "
